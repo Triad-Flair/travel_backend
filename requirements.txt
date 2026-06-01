@@ -1,0 +1,59 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# Socket.IO (matches frontend socket.io-client)
+python-socketio[asyncio_client]==5.11.4
+python-engineio==4.9.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Validation & Settings
+pydantic==2.10.3
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.20
+
+# Redis & Caching
+redis[hiredis]==5.2.1
+
+# Background Jobs
+celery[redis]==5.4.0
+celery-redbeat==2.3.3
+
+# HTTP Client
+httpx==0.28.1
+aiohttp==3.11.11
+
+# AWS S3
+boto3==1.35.88
+
+# Payments
+razorpay==1.4.1
+
+# Email
+aiosmtplib==3.0.2
+jinja2==3.1.4
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Utilities
+python-slugify==8.0.4
+cryptography==44.0.0
+python-dateutil==2.9.0.post0
+
+# Monitoring
+flower==2.0.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0

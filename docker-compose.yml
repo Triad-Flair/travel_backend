@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    ports:
+      - "4010:4010"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tripsync:tripsync@db:5432/tripsync
+      SYNC_DATABASE_URL: postgresql://tripsync:tripsync@db:5432/tripsync
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 4010 --reload
+    restart: unless-stopped
+
+  worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tripsync:tripsync@db:5432/tripsync
+      SYNC_DATABASE_URL: postgresql://tripsync:tripsync@db:5432/tripsync
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - db
+      - redis
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    restart: unless-stopped
+
+  beat:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tripsync:tripsync@db:5432/tripsync
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - redis
+    command: celery -A app.celery_app beat --loglevel=info
+    restart: unless-stopped
+
+  flower:
+    build: .
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    depends_on:
+      - redis
+    command: celery -A app.celery_app flower --port=5555
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tripsync
+      POSTGRES_USER: tripsync
+      POSTGRES_PASSWORD: tripsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tripsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:

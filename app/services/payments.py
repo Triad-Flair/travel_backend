@@ -1,0 +1,780 @@
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.exceptions import BadRequestError, ForbiddenError, NotFoundError, PaymentError
+from app.lib.razorpay_client import create_order, verify_signature
+from app.models.agency import Agency, AgencyTransaction, AgencyWallet
+from app.models.group import Group, GroupMember
+from app.models.loyalty import LoyaltyPointsLedger, ReferralWallet
+from app.models.offer import Offer
+from app.models.package import Package
+from app.models.payment import Dispute, Payment
+from app.models.plan import Plan
+from app.schemas.payments import (
+    AgencyWalletSummary,
+    AgencyWalletTransaction,
+    CreateDisputeRequest,
+    CreateOrderRequest,
+    DisputeResponse,
+    GroupPaymentOrderResponse,
+    GroupPaymentStateResponse,
+    MockCaptureRequest,
+    PaymentRecordResponse,
+    ValidatePromoRequest,
+    ValidatePromoResponse,
+    VerifyPaymentRequest,
+)
+
+PLATFORM_FEE_PAISE = 299 * 100
+FEE_GST_RATE = 0.18
+COMMISSION_RATE = 0.10
+
+ACTIVE_MEMBER_STATUSES = {"APPROVED", "COMMITTED"}
+
+
+def _iso(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def _compute_breakdown(trip_amount: int) -> dict:
+    fee_gst = int(round(PLATFORM_FEE_PAISE * FEE_GST_RATE))
+    commission = int(round(trip_amount * COMMISSION_RATE))
+    total = trip_amount + PLATFORM_FEE_PAISE + fee_gst
+    return {
+        "tripAmount": int(trip_amount),
+        "platformFeeAmount": int(PLATFORM_FEE_PAISE),
+        "feeGstAmount": int(fee_gst),
+        "commissionAmount": int(commission),
+        "agencyNetAmount": int(trip_amount - commission),
+        "totalAmount": int(total),
+    }
+
+
+def _payment_to_response(payment: Payment) -> PaymentRecordResponse:
+    return PaymentRecordResponse(
+        id=payment.id,
+        user_id=payment.user_id,
+        group_id=payment.group_id,
+        amount=int(payment.amount),
+        currency=payment.currency,
+        razorpay_order_id=payment.razorpay_order_id,
+        razorpay_payment_id=payment.razorpay_payment_id,
+        status=payment.status,
+        escrow_status=payment.escrow_status,
+        tranche1_released=bool(payment.tranche1_released),
+        tranche2_released=bool(payment.tranche2_released),
+        points_redeemed=int(payment.points_redeemed or 0),
+        wallet_amount_used=int(payment.wallet_amount_used or 0),
+        trip_amount=int(payment.trip_amount or 0),
+        platform_fee_amount=int(payment.platform_fee_amount or 0),
+        fee_gst_amount=int(payment.fee_gst_amount or 0),
+        commission_amount=int(payment.commission_amount or 0),
+        created_at=payment.created_at.isoformat(),
+        updated_at=payment.updated_at.isoformat(),
+    )
+
+
+async def _get_payment_context(db: AsyncSession, group_id: str, user_id: str) -> dict:
+    group = await db.scalar(select(Group).where(Group.id == group_id))
+    if not group:
+        raise NotFoundError("Group")
+
+    membership = await db.scalar(
+        select(GroupMember).where(
+            GroupMember.group_id == group_id,
+            GroupMember.user_id == user_id,
+        )
+    )
+    if not membership:
+        raise ForbiddenError("You are not a member of this group")
+    if membership.status not in {"INTERESTED", "APPROVED", "COMMITTED"}:
+        raise ForbiddenError("Membership is not active")
+
+    plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id)) if group.plan_id else None
+    package = await db.scalar(select(Package).where(Package.id == group.package_id)) if group.package_id else None
+
+    offer = None
+    agency = None
+    payment_source = None
+    if plan:
+        if plan.confirmed_offer_id:
+            offer = await db.scalar(select(Offer).where(Offer.id == plan.confirmed_offer_id))
+        if not offer:
+            offer = await db.scalar(
+                select(Offer)
+                .where(Offer.plan_id == plan.id, Offer.status.in_(["ACCEPTED", "COUNTERED", "PENDING"]))
+                .order_by(Offer.updated_at.desc())
+            )
+        if not offer:
+            raise BadRequestError("Payment opens after an agency offer is available")
+        agency = await db.scalar(select(Agency).where(Agency.id == offer.agency_id))
+        payment_source = "PLAN_OFFER"
+        trip_amount = int(offer.price_per_person) * 100
+    elif package:
+        agency = await db.scalar(select(Agency).where(Agency.id == package.agency_id))
+        payment_source = "PACKAGE"
+        trip_amount = int(package.price_per_person) * 100
+    else:
+        raise BadRequestError("Group has neither a plan nor a package")
+
+    if not agency:
+        raise NotFoundError("Agency")
+
+    member_rows = await db.execute(
+        select(GroupMember).where(
+            GroupMember.group_id == group_id,
+            GroupMember.status.in_(ACTIVE_MEMBER_STATUSES),
+        )
+    )
+    active_members = member_rows.scalars().all()
+    traveler_count = max(1, len(active_members))
+
+    committed_count = sum(1 for m in active_members if m.status == "COMMITTED")
+
+    payment = await db.scalar(
+        select(Payment)
+        .where(Payment.group_id == group_id, Payment.user_id == user_id)
+        .order_by(Payment.created_at.desc())
+    )
+
+    loyalty_points = await db.scalar(
+        select(func.coalesce(func.sum(LoyaltyPointsLedger.points), 0)).where(
+            LoyaltyPointsLedger.user_id == user_id,
+            LoyaltyPointsLedger.expired == False,
+        )
+    )
+    loyalty_points = int(loyalty_points or 0)
+
+    wallet = await db.scalar(select(ReferralWallet).where(ReferralWallet.user_id == user_id))
+    wallet_rupees = int(wallet.balance or 0) if wallet else 0
+
+    breakdown = _compute_breakdown(trip_amount)
+    max_redeemable_points = max(0, min(loyalty_points, int(trip_amount * 0.20 / 100)))
+    max_wallet_usable_rupees = max(0, min(wallet_rupees, int(trip_amount * 0.20 / 100)))
+
+    if payment and payment.status == "CAPTURED":
+        checkout_mode = "captured"
+    elif settings.razorpay_key_id and settings.razorpay_key_secret:
+        checkout_mode = "razorpay"
+    else:
+        checkout_mode = "mock"
+
+    return {
+        "group": group,
+        "membership": membership,
+        "plan": plan,
+        "package": package,
+        "offer": offer,
+        "agency": agency,
+        "payment_source": payment_source,
+        "breakdown": breakdown,
+        "trip_amount": trip_amount,
+        "payment": payment,
+        "committed_count": committed_count,
+        "traveler_count": traveler_count,
+        "loyalty_points": loyalty_points,
+        "max_redeemable_points": max_redeemable_points,
+        "wallet_rupees": wallet_rupees,
+        "max_wallet_usable_rupees": max_wallet_usable_rupees,
+        "checkout_mode": checkout_mode,
+    }
+
+
+async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
+    payment.status = "CAPTURED"
+    payment.paid_at = datetime.now(UTC)
+
+    member = await db.scalar(
+        select(GroupMember).where(
+            GroupMember.group_id == payment.group_id,
+            GroupMember.user_id == payment.user_id,
+        )
+    )
+    if member and member.status != "COMMITTED":
+        member.status = "COMMITTED"
+        member.committed_at = datetime.now(UTC)
+
+    group = await db.scalar(select(Group).where(Group.id == payment.group_id))
+    if not group:
+        return
+
+    members_rows = await db.execute(
+        select(GroupMember).where(
+            GroupMember.group_id == payment.group_id,
+            GroupMember.status.in_(ACTIVE_MEMBER_STATUSES),
+        )
+    )
+    members = members_rows.scalars().all()
+    member_user_ids = [m.user_id for m in members]
+    if not member_user_ids:
+        return
+
+    captured_count = await db.scalar(
+        select(func.count(Payment.id)).where(
+            Payment.group_id == payment.group_id,
+            Payment.user_id.in_(member_user_ids),
+            Payment.status == "CAPTURED",
+        )
+    ) or 0
+
+    if group.plan_id:
+        plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id))
+        if plan:
+            min_required = max(1, int(plan.group_size_min or 1))
+            if int(captured_count) >= min_required and int(captured_count) == len(member_user_ids):
+                plan.status = "CONFIRMED"
+                plan.confirmed_at = datetime.now(UTC)
+            elif plan.status == "OPEN":
+                plan.status = "CONFIRMING"
+
+    if group.package_id:
+        package = await db.scalar(select(Package).where(Package.id == group.package_id))
+        if package:
+            min_required = max(1, int(package.group_size_min or 1))
+            if int(captured_count) >= min_required and int(captured_count) == len(member_user_ids):
+                package.status = "CONFIRMED"
+            elif package.status == "OPEN":
+                package.status = "CONFIRMING"
+
+
+async def list_my_payments(
+    db: AsyncSession,
+    user_id: str,
+    page: int,
+    page_size: int,
+) -> tuple[list[PaymentRecordResponse], int]:
+    total = await db.scalar(select(func.count(Payment.id)).where(Payment.user_id == user_id)) or 0
+    rows = await db.execute(
+        select(Payment)
+        .where(Payment.user_id == user_id)
+        .order_by(Payment.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return [_payment_to_response(p) for p in rows.scalars().all()], int(total)
+
+
+async def get_group_payment_state(db: AsyncSession, group_id: str, user_id: str) -> GroupPaymentStateResponse:
+    ctx = await _get_payment_context(db, group_id, user_id)
+
+    payment = ctx["payment"]
+    breakdown = dict(ctx["breakdown"])
+    if payment:
+        breakdown["pointsRedeemed"] = int(payment.points_redeemed or 0)
+        breakdown["pointsDiscount"] = int(payment.points_redeemed or 0) * 100
+        breakdown["walletAmountUsed"] = int(payment.wallet_amount_used or 0)
+        breakdown["walletDiscount"] = int(payment.wallet_amount_used or 0) * 100
+
+    plan_payload = None
+    if ctx["plan"]:
+        plan = ctx["plan"]
+        plan_payload = {
+            "id": plan.id,
+            "title": plan.title,
+            "slug": plan.slug,
+            "status": plan.status,
+        }
+
+    package_payload = None
+    if ctx["package"]:
+        package = ctx["package"]
+        package_payload = {
+            "id": package.id,
+            "title": package.title,
+            "slug": package.slug,
+            "status": package.status,
+        }
+
+    offer_payload = None
+    if ctx["offer"]:
+        offer = ctx["offer"]
+        offer_payload = {
+            "id": offer.id,
+            "agencyName": ctx["agency"].name,
+            "pricePerPerson": int(offer.price_per_person),
+        }
+
+    return GroupPaymentStateResponse(
+        group_id=group_id,
+        agency_name=ctx["agency"].name,
+        payment_source=ctx["payment_source"],
+        plan=plan_payload,
+        package=package_payload,
+        offer=offer_payload,
+        payment=_payment_to_response(payment) if payment else None,
+        amount=int(payment.amount) if payment else int(ctx["breakdown"]["totalAmount"]),
+        breakdown=breakdown,
+        loyalty={
+            "availablePoints": ctx["loyalty_points"],
+            "maxRedeemablePoints": ctx["max_redeemable_points"],
+            "maxDiscountPaise": ctx["max_redeemable_points"] * 100,
+            "pointValueInr": 1,
+        },
+        wallet={
+            "availableBalanceRupees": ctx["wallet_rupees"],
+            "maxUsableRupees": ctx["max_wallet_usable_rupees"],
+            "autoApply": False,
+        },
+        currency="INR",
+        committed_count=int(ctx["committed_count"]),
+        traveler_count=int(ctx["traveler_count"]),
+        checkout_mode=ctx["checkout_mode"],
+        razorpay_key_id=settings.razorpay_key_id or None,
+    )
+
+
+async def create_payment_order(
+    db: AsyncSession,
+    group_id: str,
+    user_id: str,
+    req: CreateOrderRequest,
+) -> GroupPaymentOrderResponse:
+    ctx = await _get_payment_context(db, group_id, user_id)
+
+    existing = ctx["payment"]
+    if existing and existing.status == "CAPTURED":
+        return GroupPaymentOrderResponse(
+            payment=_payment_to_response(existing),
+            amount=int(existing.amount),
+            breakdown=ctx["breakdown"],
+            payment_source=ctx["payment_source"],
+            currency=existing.currency,
+            checkout_mode="captured",
+            razorpay_key_id=settings.razorpay_key_id or None,
+            description=f"{ctx['plan'].title if ctx['plan'] else ctx['package'].title} · {ctx['agency'].name}",
+        )
+
+    points = max(0, int(req.points_to_redeem or 0))
+    points = min(points, int(ctx["max_redeemable_points"]))
+
+    wallet_rupees = max(0, int(req.wallet_amount_to_use or 0))
+    wallet_rupees = min(wallet_rupees, int(ctx["max_wallet_usable_rupees"]))
+
+    points_discount = points * 100
+    wallet_discount = wallet_rupees * 100
+    gross_amount = int(ctx["breakdown"]["totalAmount"])
+    final_amount = max(100, gross_amount - points_discount - wallet_discount)
+
+    checkout_mode = "razorpay" if settings.razorpay_key_id and settings.razorpay_key_secret else "mock"
+
+    payment = existing
+    if payment and payment.status in {"PENDING", "FAILED"}:
+        payment.amount = final_amount
+        payment.points_redeemed = points
+        payment.wallet_amount_used = wallet_rupees
+        payment.trip_amount = int(ctx["breakdown"]["tripAmount"])
+        payment.platform_fee_amount = int(ctx["breakdown"]["platformFeeAmount"])
+        payment.fee_gst_amount = int(ctx["breakdown"]["feeGstAmount"])
+        payment.commission_amount = int(ctx["breakdown"]["commissionAmount"])
+        payment.status = "PENDING"
+    else:
+        payment = Payment(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            group_id=group_id,
+            agency_id=ctx["agency"].id,
+            plan_id=ctx["plan"].id if ctx["plan"] else None,
+            package_id=ctx["package"].id if ctx["package"] else None,
+            amount=final_amount,
+            currency="INR",
+            status="PENDING",
+            escrow_status="HELD",
+            trip_amount=int(ctx["breakdown"]["tripAmount"]),
+            platform_fee_amount=int(ctx["breakdown"]["platformFeeAmount"]),
+            fee_gst_amount=int(ctx["breakdown"]["feeGstAmount"]),
+            commission_amount=int(ctx["breakdown"]["commissionAmount"]),
+            source=ctx["payment_source"],
+            points_redeemed=points,
+            wallet_amount_used=wallet_rupees,
+        )
+        db.add(payment)
+
+    description = f"{ctx['plan'].title if ctx['plan'] else ctx['package'].title} · {ctx['agency'].name}"
+    if checkout_mode == "razorpay":
+        try:
+            order = create_order(
+                final_amount,
+                receipt=f"grp_{group_id[:12]}",
+                notes={"groupId": group_id, "userId": user_id, "paymentId": payment.id},
+            )
+            payment.razorpay_order_id = order.get("id")
+        except PaymentError:
+            checkout_mode = "mock"
+
+    if checkout_mode == "mock" and not payment.razorpay_order_id:
+        payment.razorpay_order_id = f"order_mock_{payment.id.replace('-', '')[:20]}"
+
+    await db.flush()
+
+    breakdown = dict(ctx["breakdown"])
+    breakdown["pointsRedeemed"] = points
+    breakdown["pointsDiscount"] = points_discount
+    breakdown["walletAmountUsed"] = wallet_rupees
+    breakdown["walletDiscount"] = wallet_discount
+
+    return GroupPaymentOrderResponse(
+        payment=_payment_to_response(payment),
+        amount=final_amount,
+        breakdown=breakdown,
+        payment_source=ctx["payment_source"],
+        currency=payment.currency,
+        checkout_mode=checkout_mode,
+        razorpay_key_id=settings.razorpay_key_id or None,
+        description=description,
+    )
+
+
+async def validate_promo(
+    db: AsyncSession,
+    req: ValidatePromoRequest,
+    user_id: str,
+) -> ValidatePromoResponse:
+    return ValidatePromoResponse(
+        valid=False,
+        discount_type=None,
+        discount_value=None,
+        discount_paise=None,
+        message="Promo validation is currently unavailable",
+    )
+
+
+async def verify_payment(db: AsyncSession, req: VerifyPaymentRequest, user_id: str) -> PaymentRecordResponse:
+    payment = await db.scalar(select(Payment).where(Payment.id == req.payment_id))
+    if not payment:
+        raise NotFoundError("Payment")
+    if payment.user_id != user_id:
+        raise ForbiddenError("You cannot verify this payment")
+
+    if payment.status == "CAPTURED":
+        return _payment_to_response(payment)
+
+    if not payment.razorpay_order_id:
+        raise BadRequestError("Payment order is missing")
+
+    should_verify_signature = bool(settings.razorpay_key_secret)
+    if should_verify_signature and not verify_signature(
+        req.razorpay_order_id,
+        req.razorpay_payment_id,
+        req.razorpay_signature,
+    ):
+        raise PaymentError("Invalid payment signature")
+
+    payment.razorpay_order_id = req.razorpay_order_id
+    payment.razorpay_payment_id = req.razorpay_payment_id
+    await _finalize_capture(db, payment)
+    await db.flush()
+
+    return _payment_to_response(payment)
+
+
+async def mock_capture(db: AsyncSession, req: MockCaptureRequest, user_id: str) -> PaymentRecordResponse:
+    payment = await db.scalar(select(Payment).where(Payment.id == req.payment_id))
+    if not payment:
+        raise NotFoundError("Payment")
+    if payment.user_id != user_id:
+        raise ForbiddenError("You cannot capture this payment")
+
+    if payment.status == "CAPTURED":
+        return _payment_to_response(payment)
+
+    if not payment.razorpay_payment_id:
+        payment.razorpay_payment_id = f"pay_mock_{payment.id.replace('-', '')[:20]}"
+
+    await _finalize_capture(db, payment)
+    await db.flush()
+    return _payment_to_response(payment)
+
+
+async def create_dispute(db: AsyncSession, req: CreateDisputeRequest, user_id: str) -> DisputeResponse:
+    payment = await db.scalar(select(Payment).where(Payment.id == req.payment_id))
+    if not payment:
+        raise NotFoundError("Payment")
+    if payment.user_id != user_id:
+        raise ForbiddenError("You cannot dispute this payment")
+
+    dispute = await db.scalar(select(Dispute).where(Dispute.payment_id == payment.id))
+    if dispute:
+        return DisputeResponse(
+            id=dispute.id,
+            payment_id=dispute.payment_id,
+            reason=dispute.reason,
+            status=dispute.status,
+            created_at=dispute.created_at.isoformat(),
+        )
+
+    dispute = Dispute(
+        id=str(uuid.uuid4()),
+        payment_id=payment.id,
+        reason=req.reason,
+        status="OPEN",
+    )
+    db.add(dispute)
+    await db.flush()
+
+    return DisputeResponse(
+        id=dispute.id,
+        payment_id=dispute.payment_id,
+        reason=dispute.reason,
+        status=dispute.status,
+        created_at=dispute.created_at.isoformat(),
+    )
+
+
+async def get_agency_wallet_summary(db: AsyncSession, agency_id: str) -> AgencyWalletSummary:
+    wallet = await db.scalar(select(AgencyWallet).where(AgencyWallet.agency_id == agency_id))
+    if not wallet:
+        wallet = AgencyWallet(id=str(uuid.uuid4()), agency_id=agency_id)
+        db.add(wallet)
+        await db.flush()
+
+    return AgencyWalletSummary(
+        pending_balance=int(wallet.pending_balance or 0),
+        available_balance=int(wallet.available_balance or 0),
+        total_earned=int(wallet.total_earned or 0),
+        total_commission=int(wallet.total_commission or 0),
+        security_deposit=int(wallet.security_deposit or 0),
+        payout_mode=wallet.payout_mode or "TRUST",
+    )
+
+
+async def list_agency_wallet_transactions(db: AsyncSession, agency_id: str) -> list[AgencyWalletTransaction]:
+    wallet = await db.scalar(select(AgencyWallet).where(AgencyWallet.agency_id == agency_id))
+    if not wallet:
+        return []
+
+    rows = await db.execute(
+        select(AgencyTransaction)
+        .where(AgencyTransaction.wallet_id == wallet.id)
+        .order_by(AgencyTransaction.created_at.desc())
+        .limit(200)
+    )
+
+    return [
+        AgencyWalletTransaction(
+            id=tx.id,
+            type=tx.type,
+            amount=int(tx.amount),
+            description=tx.description,
+            group_id=tx.group_id,
+            payment_id=tx.payment_id,
+            razorpay_transfer_id=tx.razorpay_transfer_id,
+            created_at=tx.created_at.isoformat(),
+        )
+        for tx in rows.scalars().all()
+    ]
+
+
+async def handle_razorpay_webhook(db: AsyncSession, event: str, payload: dict) -> None:
+    order_id = payload.get("order_id")
+    if not order_id:
+        return
+
+    payment = await db.scalar(select(Payment).where(Payment.razorpay_order_id == order_id))
+    if not payment:
+        return
+
+    if event == "payment.captured" and payment.status != "CAPTURED":
+        payment.razorpay_payment_id = payload.get("id") or payment.razorpay_payment_id
+        await _finalize_capture(db, payment)
+        await db.flush()
+
+    if event == "payment.failed":
+        payment.status = "FAILED"
+        await db.flush()
+
+
+async def get_checkout_breakdown(
+    db: AsyncSession,
+    group_id: str,
+    user_id: str,
+    points_to_redeem: int | None = None,
+    wallet_amount_to_use: int | None = None,
+) -> dict:
+    ctx = await _get_payment_context(db, group_id, user_id)
+    points = max(0, int(points_to_redeem or 0))
+    points = min(points, int(ctx["max_redeemable_points"]))
+    wallet_rupees = max(0, int(wallet_amount_to_use or 0))
+    wallet_rupees = min(wallet_rupees, int(ctx["max_wallet_usable_rupees"]))
+
+    points_discount = points * 100
+    wallet_discount = wallet_rupees * 100
+    gross = int(ctx["breakdown"]["totalAmount"])
+    final_amount = max(100, gross - points_discount - wallet_discount)
+
+    breakdown = dict(ctx["breakdown"])
+    breakdown["pointsRedeemed"] = points
+    breakdown["pointsDiscount"] = points_discount
+    breakdown["walletAmountUsed"] = wallet_rupees
+    breakdown["walletDiscount"] = wallet_discount
+    breakdown["finalAmount"] = final_amount
+    return breakdown
+
+
+async def list_disputes_for_agency(db: AsyncSession, agency_id: str) -> list[dict]:
+    rows = await db.execute(
+        select(Dispute)
+        .join(Payment, Payment.id == Dispute.payment_id)
+        .where(Payment.agency_id == agency_id)
+        .order_by(Dispute.created_at.desc())
+    )
+    return [
+        {
+            "id": dispute.id,
+            "paymentId": dispute.payment_id,
+            "reason": dispute.reason,
+            "status": dispute.status,
+            "createdAt": dispute.created_at.isoformat(),
+        }
+        for dispute in rows.scalars().all()
+    ]
+
+
+async def resolve_dispute(db: AsyncSession, dispute_id: str, resolution: str, notes: str | None = None) -> dict:
+    dispute = await db.scalar(select(Dispute).where(Dispute.id == dispute_id))
+    if not dispute:
+        raise NotFoundError("Dispute")
+    dispute.status = "RESOLVED"
+    await db.flush()
+    return {
+        "id": dispute.id,
+        "paymentId": dispute.payment_id,
+        "status": dispute.status,
+        "resolution": resolution,
+        "notes": notes,
+        "resolvedAt": datetime.now(UTC).isoformat(),
+    }
+
+
+async def get_payment_tracking_map(db: AsyncSession, user_id: str) -> list[dict]:
+    rows = await db.execute(
+        select(Payment).where(Payment.user_id == user_id).order_by(Payment.created_at.desc())
+    )
+    return [
+        {
+            "id": payment.id,
+            "groupId": payment.group_id,
+            "status": payment.status,
+            "escrowStatus": payment.escrow_status,
+            "amount": int(payment.amount),
+            "currency": payment.currency,
+            "paidAt": _iso(payment.paid_at),
+            "createdAt": payment.created_at.isoformat(),
+        }
+        for payment in rows.scalars().all()
+    ]
+
+
+async def get_admin_payment_map(
+    db: AsyncSession,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict:
+    query = select(Payment).order_by(Payment.created_at.desc()).limit(limit)
+    rows = await db.execute(query)
+    items = rows.scalars().all()
+    return {
+        "payments": [_payment_to_response(p).model_dump(by_alias=True) for p in items],
+        "cursor": items[-1].id if items else None,
+    }
+
+
+async def get_agency_payout_summary(db: AsyncSession, agency_id: str) -> dict:
+    wallet = await get_agency_wallet_summary(db, agency_id)
+    rows = await db.execute(
+        select(Payment)
+        .where(Payment.agency_id == agency_id)
+        .order_by(Payment.created_at.desc())
+        .limit(100)
+    )
+    payments = rows.scalars().all()
+    return {
+        "wallet": wallet.model_dump(by_alias=True),
+        "payments": [_payment_to_response(p).model_dump(by_alias=True) for p in payments],
+    }
+
+
+async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str) -> dict:
+    payment = await db.scalar(select(Payment).where(Payment.id == payment_id))
+    if not payment:
+        raise NotFoundError("Payment")
+
+    if tranche == "tranche2":
+        payment.tranche2_released = True
+    else:
+        payment.tranche1_released = True
+
+    if payment.tranche1_released and payment.tranche2_released:
+        payment.escrow_status = "RELEASED"
+    else:
+        payment.escrow_status = "PARTIAL_RELEASE"
+
+    await db.flush()
+    return {
+        "paymentId": payment.id,
+        "tranche": tranche,
+        "escrowStatus": payment.escrow_status,
+        "releasedAt": datetime.now(UTC).isoformat(),
+    }
+
+
+async def resolve_confirming_window(db: AsyncSession, group_id: str) -> dict:
+    group = await db.scalar(select(Group).where(Group.id == group_id))
+    if not group:
+        raise NotFoundError("Group")
+
+    if group.plan_id:
+        plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id))
+        if plan and plan.status == "CONFIRMING":
+            plan.status = "CONFIRMED"
+            plan.confirmed_at = datetime.now(UTC)
+
+    if group.package_id:
+        package = await db.scalar(select(Package).where(Package.id == group.package_id))
+        if package and package.status == "CONFIRMING":
+            package.status = "CONFIRMED"
+
+    await db.flush()
+    return {"groupId": group_id, "status": "resolved"}
+
+
+async def reconcile_pending_payments(db: AsyncSession, limit: int = 50) -> dict:
+    rows = await db.execute(
+        select(Payment)
+        .where(Payment.status == "PENDING")
+        .order_by(Payment.created_at.asc())
+        .limit(limit)
+    )
+    items = rows.scalars().all()
+    return {"checked": len(items), "updated": 0}
+
+
+async def complete_trip(db: AsyncSession, group_id: str) -> dict:
+    group = await db.scalar(select(Group).where(Group.id == group_id))
+    if not group:
+        raise NotFoundError("Group")
+
+    if group.plan_id:
+        plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id))
+        if plan:
+            plan.status = "COMPLETED"
+
+    if group.package_id:
+        package = await db.scalar(select(Package).where(Package.id == group.package_id))
+        if package:
+            package.status = "COMPLETED"
+
+    rows = await db.execute(select(Payment).where(Payment.group_id == group_id))
+    for payment in rows.scalars().all():
+        payment.escrow_status = "RELEASED"
+        payment.tranche2_released = True
+
+    await db.flush()
+    return {"groupId": group_id, "status": "COMPLETED"}
