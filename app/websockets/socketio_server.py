@@ -20,7 +20,7 @@ except Exception as _exc:
 sio = socketio.AsyncServer(
     client_manager=_redis_mgr,
     async_mode="asgi",
-    cors_allowed_origins="*",
+    cors_allowed_origins=settings.cors_origins,
     logger=False,
     engineio_logger=False,
 )
