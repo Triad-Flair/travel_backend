@@ -36,6 +36,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.check_payment_windows",
             "schedule": crontab(minute="*/5"),
         },
+        "check-package-expiry-warnings": {
+            "task": "app.workers.tasks.check_package_expiry_warnings",
+            "schedule": crontab(hour=9, minute=0),
+        },
         # Package view counters live in Redis — no periodic DB flush needed
         # (views are read directly from Redis via GET pkg:views:{id}).
         # Add a flush task here if you later add a `view_count` DB column.

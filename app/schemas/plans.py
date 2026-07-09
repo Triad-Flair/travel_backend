@@ -3,7 +3,7 @@ from datetime import datetime
 from pydantic import Field
 
 from app.schemas.base import CamelModel
-from app.schemas.common import AgencySummary, UserSummary
+from app.schemas.common import AgencyPublicSummary, UserSummary
 
 
 class ItineraryItem(CamelModel):
@@ -41,7 +41,7 @@ class OfferInPlan(CamelModel):
     referred_at: str | None = None
     created_at: str
     updated_at: str
-    agency: AgencySummary
+    agency: AgencyPublicSummary
     negotiations: list[Negotiation] = []
 
 

@@ -131,11 +131,17 @@ async def _batch_pkg_joined_counts(db: AsyncSession, pkg_ids: list[str]) -> dict
 
 
 async def get_discover_feed(
-    db: AsyncSession, filters: DiscoverFilters
+    db: AsyncSession, filters: DiscoverFilters, requesting_agency_id: str | None = None
 ) -> list[DiscoverItem]:
+    """requesting_agency_id: when the caller is an agency, Discover shows
+    only Plans (User + Corporate — there is no third plan_type) — Packages
+    are other agencies' own catalog listings, not leads an agency should be
+    browsing (PRD 2.3). Filtered at the query level below, not by dropping
+    rows after fetch, so it can't be bypassed by pagination math."""
     import hashlib
     filters_hash = hashlib.md5(filters.model_dump_json().encode()).hexdigest()[:12]
-    cache_key = CacheKeys.discover_feed(filters.page, filters_hash)
+    audience_marker = "agency" if requesting_agency_id else "public"
+    cache_key = CacheKeys.discover_feed(filters.page, f"{filters_hash}:{audience_marker}")
 
     cached = await get_cached(cache_key)
     if cached:
@@ -145,6 +151,8 @@ async def get_discover_feed(
     raw_pkgs: list[Package] = []
     half = filters.page_size // 2
     offset = (filters.page - 1) * filters.page_size
+
+    show_packages = not requesting_agency_id
 
     if filters.origin_type in (None, "plan"):
         q = select(Plan).where(Plan.status == 'OPEN')
@@ -161,12 +169,14 @@ async def get_discover_feed(
             q = q.order_by(Plan.budget_max.desc().nullslast())
         else:
             q = q.order_by(Plan.created_at.desc())
-        limit = filters.page_size if filters.origin_type == "plan" else half
-        off = offset if filters.origin_type == "plan" else 0
+        # An agency viewer gets no package results at all (see show_packages
+        # below), so give the plan query the full page rather than half.
+        limit = filters.page_size if (filters.origin_type == "plan" or not show_packages) else half
+        off = offset if (filters.origin_type == "plan" or not show_packages) else 0
         result = await db.execute(q.offset(off).limit(limit))
         raw_plans = list(result.scalars().all())
 
-    if filters.origin_type in (None, "package"):
+    if show_packages and filters.origin_type in (None, "package"):
         q = select(Package).where(Package.status == 'OPEN')
         if filters.destination:
             q = q.where(Package.destination.ilike(f"%{filters.destination}%"))
@@ -212,7 +222,14 @@ async def get_discover_feed(
     return items
 
 
-async def get_trending(db: AsyncSession, page: int, page_size: int) -> list[DiscoverItem]:
+async def get_trending(
+    db: AsyncSession, page: int, page_size: int, requesting_agency_id: str | None = None
+) -> list[DiscoverItem]:
+    if requesting_agency_id:
+        # Trending is packages-only — an agency viewer has nothing to see
+        # here by the same rule as get_discover_feed (PRD 2.3).
+        return []
+
     cache_key = CacheKeys.trending(page)
     cached = await get_cached(cache_key)
     if cached:
@@ -230,9 +247,12 @@ async def get_trending(db: AsyncSession, page: int, page_size: int) -> list[Disc
     return items
 
 
-async def search(db: AsyncSession, q: str, page: int, page_size: int) -> list[DiscoverItem]:
+async def search(
+    db: AsyncSession, q: str, page: int, page_size: int, requesting_agency_id: str | None = None
+) -> list[DiscoverItem]:
     term = f"%{q}%"
     items: list[DiscoverItem] = []
+    show_packages = not requesting_agency_id
 
     plan_result = await db.execute(
         select(Plan)
@@ -241,22 +261,23 @@ async def search(db: AsyncSession, q: str, page: int, page_size: int) -> list[Di
             (Plan.title.ilike(term) | Plan.destination.ilike(term)),
         )
         .order_by(Plan.created_at.desc())
-        .limit(page_size // 2)
+        .limit(page_size if not show_packages else page_size // 2)
     )
     for plan in plan_result.scalars().all():
         items.append(_plan_to_discover(plan))
 
-    pkg_result = await db.execute(
-        select(Package)
-        .where(
-            Package.status == 'OPEN',
-            (Package.title.ilike(term) | Package.destination.ilike(term)),
+    if show_packages:
+        pkg_result = await db.execute(
+            select(Package)
+            .where(
+                Package.status == 'OPEN',
+                (Package.title.ilike(term) | Package.destination.ilike(term)),
+            )
+            .order_by(Package.created_at.desc())
+            .limit(page_size // 2)
         )
-        .order_by(Package.created_at.desc())
-        .limit(page_size // 2)
-    )
-    for pkg in pkg_result.scalars().all():
-        items.append(_pkg_to_discover(pkg))
+        for pkg in pkg_result.scalars().all():
+            items.append(_pkg_to_discover(pkg))
 
     return items
 

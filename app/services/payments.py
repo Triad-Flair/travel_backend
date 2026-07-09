@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -9,10 +10,9 @@ from app.exceptions import BadRequestError, ForbiddenError, NotFoundError, Payme
 from app.lib.email import (
     send_agency_booking_invoice_email,
     send_agency_payout_update_email,
-    send_payment_receipt_email,
 )
-from app.lib.razorpay_client import create_order, verify_signature
-from app.models.agency import Agency, AgencyTransaction, AgencyWallet
+from app.lib.razorpay_client import create_order, create_transfer, verify_signature
+from app.models.agency import Agency, AgencyBankAccount, AgencyTransaction, AgencyWallet
 from app.models.group import Group, GroupMember
 from app.models.loyalty import LoyaltyPointsLedger, ReferralWallet
 from app.models.offer import Offer
@@ -36,11 +36,20 @@ from app.schemas.payments import (
 )
 from app.services import invoices as inv_svc
 
+logger = logging.getLogger(__name__)
+
 PLATFORM_FEE_PAISE = 299 * 100
 FEE_GST_RATE = 0.18
 COMMISSION_RATE = 0.10
+TRANCHE_1_RATIO = 0.45
+TRANCHE_2_RATIO = 0.55
 
 ACTIVE_MEMBER_STATUSES = {"APPROVED", "COMMITTED"}
+
+
+def _tranche_amount(agency_net: int, tranche: str) -> int:
+    ratio = TRANCHE_2_RATIO if tranche == "tranche2" else TRANCHE_1_RATIO
+    return int(round(agency_net * ratio))
 
 
 def _iso(value):
@@ -97,14 +106,10 @@ async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> Non
 
     traveler = await db.scalar(select(User).where(User.id == payment.user_id))
     if traveler and traveler.email and trip:
-        await send_payment_receipt_email(
-            traveler.email,
-            traveler.display_name or traveler.username or "Traveler",
-            invoice.invoice_number,
-            trip.title,
-            f"{settings.frontend_url}/dashboard/invoices/{payment.id}",
-            int(payment.amount or 0),
-        )
+        # PRD trigger: send_transactional_invoice_email — routed through
+        # Celery (see app/workers/tasks.py) rather than a direct await.
+        from app.workers.tasks import send_transactional_invoice_email_task
+        send_transactional_invoice_email_task.delay(payment.id)
 
     if agency and agency.owner_id and trip:
         owner = await db.scalar(select(User).where(User.id == agency.owner_id))
@@ -132,12 +137,8 @@ async def _send_payout_notification(db: AsyncSession, payment: Payment, tranche:
         return
 
     agency_net = int((payment.trip_amount or 0) - (payment.commission_amount or 0))
-    if tranche == "tranche2":
-        tranche_label = "Final settlement"
-        released_amount = int(round(agency_net * 0.55))
-    else:
-        tranche_label = "Advance payout"
-        released_amount = int(round(agency_net * 0.45))
+    tranche_label = "Final settlement" if tranche == "tranche2" else "Advance payout"
+    released_amount = _tranche_amount(agency_net, tranche)
 
     await send_agency_payout_update_email(
         owner.email,
@@ -544,6 +545,9 @@ async def verify_payment(db: AsyncSession, req: VerifyPaymentRequest, user_id: s
     payment.razorpay_payment_id = req.razorpay_payment_id
     await _finalize_capture(db, payment)
     await db.flush()
+    # payment.updated_at has onupdate=func.now() — see the identical comment
+    # in services/offers.py::counter_offer for why this refresh is needed.
+    await db.refresh(payment)
 
     return _payment_to_response(payment)
 
@@ -563,6 +567,7 @@ async def mock_capture(db: AsyncSession, req: MockCaptureRequest, user_id: str) 
 
     await _finalize_capture(db, payment)
     await db.flush()
+    await db.refresh(payment)  # see comment in verify_payment re: expired onupdate column
     return _payment_to_response(payment)
 
 
@@ -780,6 +785,58 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
         raise NotFoundError("Payment")
 
     already_released = bool(payment.tranche2_released) if tranche == "tranche2" else bool(payment.tranche1_released)
+    if already_released:
+        # Idempotent: never re-attempt a Razorpay transfer for a tranche
+        # that's already marked released.
+        return {
+            "paymentId": payment.id,
+            "tranche": tranche,
+            "escrowStatus": payment.escrow_status,
+            "releasedAt": datetime.now(UTC).isoformat(),
+        }
+
+    ctx = await inv_svc._trip_context(db, payment)
+    agency = ctx["agency"]
+    agency_net = int((payment.trip_amount or 0) - (payment.commission_amount or 0))
+    amount = _tranche_amount(agency_net, tranche)
+
+    bank = (
+        await db.scalar(select(AgencyBankAccount).where(AgencyBankAccount.agency_id == agency.id))
+        if agency else None
+    )
+    is_real_payment = bool(payment.razorpay_payment_id) and not payment.razorpay_payment_id.startswith("pay_mock_")
+    can_route_transfer = bool(
+        settings.razorpay_key_id
+        and settings.razorpay_key_secret
+        and bank
+        and bank.razorpay_account_id
+        and is_real_payment
+        and amount > 0
+    )
+
+    # Seam: without a Razorpay linked account on file (true for every agency
+    # today — see agency_bank_accounts.razorpayAccountId), this falls back to
+    # the pre-existing manual/bookkeeping-only payout. Once an agency is
+    # onboarded through Razorpay's Linked Account/KYC flow (not built here),
+    # this same call starts moving real money via Razorpay Route.
+    transfer_id = None
+    if can_route_transfer:
+        try:
+            transfer = create_transfer(
+                payment.razorpay_payment_id,
+                bank.razorpay_account_id,
+                amount,
+                notes={"paymentId": payment.id, "tranche": tranche},
+            )
+            transfer_id = transfer.get("id")
+        except PaymentError as exc:
+            logger.error("Razorpay Route transfer failed for payment %s (%s): %s", payment.id, tranche, exc)
+            payment.transfer_status = "FAILED"
+            await db.flush()
+            raise BadRequestError(
+                "Razorpay transfer failed — the agency has not been paid. Check the linked account and retry."
+            ) from exc
+
     if tranche == "tranche2":
         payment.tranche2_released = True
     else:
@@ -790,15 +847,32 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
         payment.transfer_status = "SETTLED"
     else:
         payment.escrow_status = "PARTIAL_RELEASE"
-        payment.transfer_status = "PROCESSING"
+        payment.transfer_status = "SETTLED" if transfer_id else "PROCESSING"
+
+    if agency:
+        wallet = await db.scalar(select(AgencyWallet).where(AgencyWallet.agency_id == agency.id))
+        if wallet:
+            wallet.available_balance = int(wallet.available_balance or 0) + amount
+            wallet.total_earned = int(wallet.total_earned or 0) + amount
+        db.add(
+            AgencyTransaction(
+                id=str(uuid.uuid4()),
+                wallet_id=wallet.id if wallet else "",
+                type="PAYOUT_ROUTE" if transfer_id else "PAYOUT_MANUAL",
+                amount=amount,
+                description=f"{tranche} payout for payment {payment.id}",
+                payment_id=payment.id,
+                razorpay_transfer_id=transfer_id,
+            )
+        )
 
     await db.flush()
-    if not already_released:
-        await _send_payout_notification(db, payment, tranche)
+    await _send_payout_notification(db, payment, tranche)
     return {
         "paymentId": payment.id,
         "tranche": tranche,
         "escrowStatus": payment.escrow_status,
+        "transferId": transfer_id,
         "releasedAt": datetime.now(UTC).isoformat(),
     }
 

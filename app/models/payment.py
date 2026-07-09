@@ -29,7 +29,7 @@ class Payment(TimestampsMixin, BaseModel):
     fee_gst_amount: Mapped[int | None] = mapped_column("feeGstAmount", Integer, nullable=True)
     commission_amount: Mapped[int | None] = mapped_column("commissionAmount", Integer, nullable=True)
     source: Mapped[str | None] = mapped_column("source", PgEnum("PLAN_OFFER","PACKAGE",name="PaymentSource",create_type=False), nullable=True)
-    transfer_status: Mapped[str | None] = mapped_column("transferStatus", PgEnum("QUEUED","PROCESSING","SETTLED","FAILED","MANUAL",name="TransferStatus",create_type=False), nullable=True)
+    transfer_status: Mapped[str] = mapped_column("transferStatus", PgEnum("QUEUED","PROCESSING","SETTLED","FAILED","MANUAL",name="TransferStatus",create_type=False), default="QUEUED", nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column("paidAt", DateTime(timezone=True), nullable=True)
     points_redeemed: Mapped[int] = mapped_column("pointsRedeemed", Integer, default=0, nullable=False)
     wallet_amount_used: Mapped[int] = mapped_column("walletAmountUsed", Integer, default=0, nullable=False)

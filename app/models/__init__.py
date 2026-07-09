@@ -13,6 +13,7 @@ from app.models.agency import (
 )
 from app.models.chat import (
     ChatMessage,
+    ChatModerationKeyword,
     DirectConversation,
     DirectConversationParticipant,
     DirectMessage,
@@ -20,6 +21,7 @@ from app.models.chat import (
     PollVote,
 )
 from app.models.group import Group, GroupMember
+from app.models.location import City, State
 from app.models.loyalty import (
     LoyaltyPointsLedger,
     ReferralLink,
@@ -47,9 +49,10 @@ __all__ = [
     "InsuranceQuote", "AgencyCustomer", "AgencyCampaign", "FraudRiskFlag",
     "Plan", "Package",
     "Group", "GroupMember",
+    "State", "City",
     "Offer", "OfferNegotiation",
     "Payment", "Invoice", "Dispute", "PromotionalDiscount", "PromoCodeUsage", "GstVerificationLog",
-    "ChatMessage", "DirectConversation", "DirectConversationParticipant",
+    "ChatMessage", "ChatModerationKeyword", "DirectConversation", "DirectConversationParticipant",
     "DirectMessage", "Poll", "PollVote",
     "Follow", "ProfileView", "Review", "Notification",
     "LoyaltyPointsLedger", "ReferralLink", "ReferralWallet", "ReferralWalletTransaction",

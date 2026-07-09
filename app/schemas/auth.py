@@ -1,6 +1,21 @@
-from pydantic import EmailStr, Field
+import re
+
+from pydantic import EmailStr, Field, field_validator
 
 from app.schemas.base import CamelModel
+
+# 10-digit Indian mobile number, first digit 6-9 — matches the pattern
+# services/auth.py already uses to detect phone-as-identifier at login.
+INDIAN_MOBILE_PATTERN = re.compile(r"^[6-9]\d{9}$")
+
+
+def _validate_indian_mobile(value: str | None) -> str | None:
+    if value is None:
+        return value
+    cleaned = value.strip()
+    if not INDIAN_MOBILE_PATTERN.fullmatch(cleaned):
+        raise ValueError("Enter a valid 10-digit Indian mobile number")
+    return cleaned
 
 
 # ── Request schemas ───────────────────────────────────────────────────────────
@@ -18,6 +33,8 @@ class TravelerSignupRequest(CamelModel):
     bio: str | None = None
     avatar_url: str | None = None
     referral_code: str | None = None
+
+    _validate_phone = field_validator("phone")(_validate_indian_mobile)
 
 
 class AgencySignupRequest(CamelModel):
@@ -45,6 +62,9 @@ class AgencySignupRequest(CamelModel):
     tourism_license: str | None = None
     specializations: list[str] = []
     destinations: list[str] = []
+
+    _validate_phone = field_validator("phone")(_validate_indian_mobile)
+    _validate_agency_phone = field_validator("agency_phone")(_validate_indian_mobile)
 
 
 class LoginRequest(CamelModel):

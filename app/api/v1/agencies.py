@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import CurrentUser, get_current_user
+from app.dependencies import CurrentUser, get_current_user, get_optional_user
 from app.schemas.agencies import (
     CreateAgencyRequest,
     GstVerifyResponse,
@@ -53,8 +53,13 @@ async def create_agency(
 
 
 @router.get("/{slug_or_id}")
-async def get_agency(slug_or_id: str, db: AsyncSession = Depends(get_db)):
-    return await ag_svc.get_agency_by_slug(db, slug_or_id)
+async def get_agency(
+    slug_or_id: str,
+    current_user: CurrentUser | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    requesting_user_id = current_user.user_id if current_user else None
+    return await ag_svc.get_agency_by_slug(db, slug_or_id, requesting_user_id)
 
 
 @router.patch("/{agency_id}")
@@ -75,6 +80,36 @@ async def submit_verification(
     db: AsyncSession = Depends(get_db),
 ):
     return await ag_svc.submit_verification(db, agency_id, current_user.user_id, payload)
+
+
+@router.get("/admin/pending-verification")
+async def list_pending_verification(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await ag_svc.list_pending_verification_agencies(db)
+
+
+@router.post("/{agency_id}/verification/approve")
+async def approve_verification(
+    agency_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await ag_svc.approve_verification(db, agency_id)
+
+
+@router.post("/{agency_id}/verification/reject")
+async def reject_verification(
+    agency_id: str,
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await ag_svc.reject_verification(db, agency_id, payload.get("reason"))
 
 
 @router.get("/{agency_id}/bank")

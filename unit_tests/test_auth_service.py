@@ -13,6 +13,7 @@ async def test_agency_signup_rejects_existing_owner_phone():
     db = AsyncMock()
     db.scalar = AsyncMock(
         side_effect=[
+            SimpleNamespace(id="state-uttar-pradesh"),  # state lookup (agencyState="Uttar Pradesh")
             None,  # email lookup
             None,  # username lookup
             SimpleNamespace(id="existing-user"),  # phone lookup

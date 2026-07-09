@@ -28,6 +28,7 @@ class Agency(TimestampsMixin, BaseModel):
     specializations: Mapped[list | dict | None] = mapped_column("specializations", JSONB, nullable=True)
     destinations: Mapped[list | dict | None] = mapped_column("destinations", JSONB, nullable=True)
     verification_status: Mapped[str] = mapped_column("verification", String(30), default="pending", nullable=False)
+    verification_rejection_reason: Mapped[str | None] = mapped_column("verificationRejectionReason", Text, nullable=True)
     avg_rating: Mapped[float] = mapped_column("avgRating", Float, default=0.0, nullable=False)
     review_count: Mapped[int] = mapped_column("totalReviews", Integer, default=0, nullable=False)
     total_trips: Mapped[int] = mapped_column("totalTrips", Integer, default=0, nullable=False)
@@ -135,6 +136,7 @@ class AgencyBankAccount(TimestampsMixin, BaseModel):
     account_holder_name: Mapped[str] = mapped_column("accountHolderName", String(100), nullable=False)
     bank_name: Mapped[str | None] = mapped_column("bankName", String(100), nullable=True)
     is_verified: Mapped[bool] = mapped_column("verificationStatus", Boolean, default=False, nullable=False)
+    razorpay_account_id: Mapped[str | None] = mapped_column("razorpayAccountId", String(50), nullable=True)
 
     agency = relationship("Agency", lazy="noload")
 

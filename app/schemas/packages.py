@@ -1,7 +1,7 @@
 from pydantic import Field
 
 from app.schemas.base import CamelModel
-from app.schemas.common import AgencyCard, AgencySummary
+from app.schemas.common import AgencyCard, AgencyPublicSummary
 from app.schemas.plans import GroupSummary, ItineraryItem
 
 
@@ -53,7 +53,7 @@ class PackageDetails(CamelModel):
     cancellation_policy: str | None = None
     cancellation_rules: dict | None = None
     status: str
-    agency: AgencySummary
+    agency: AgencyPublicSummary
     group: GroupSummary | None = None
     created_at: str
     updated_at: str
@@ -75,7 +75,7 @@ class PackageMeta(CamelModel):
     gallery_urls: list[str] | None = None
     vibes: list[str] | None = None
     status: str
-    agency: AgencySummary
+    agency: AgencyPublicSummary
     created_at: str
 
 

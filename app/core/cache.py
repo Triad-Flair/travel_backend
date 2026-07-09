@@ -84,6 +84,10 @@ class CacheKeys:
         return f"agency:detail:{agency_id}"
 
     @staticmethod
+    def chat_moderation_keywords() -> str:
+        return "chat:moderation:keywords"
+
+    @staticmethod
     def agency_by_slug(slug: str) -> str:
         return f"agency:slug:{slug}"
 

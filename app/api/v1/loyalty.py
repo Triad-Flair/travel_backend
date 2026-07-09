@@ -5,9 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user
+from app.exceptions import ForbiddenError
+from app.models.enums import UserRole
 from app.services import loyalty as loyalty_svc
 
 router = APIRouter(prefix="/loyalty", tags=["loyalty"])
+
+
+def _block_agencies(current_user: CurrentUser) -> None:
+    """Refer & Earn is a consumer/traveler feature (PRD 2.3) — agency
+    accounts get a clear 403, not a silently empty/hidden UI element."""
+    if current_user.role == UserRole.AGENCY_ADMIN:
+        raise ForbiddenError("Refer & Earn is not available for agency accounts")
 
 
 @router.get("/balance")
@@ -63,6 +72,7 @@ async def get_my_referral_link(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_or_create_referral_link(db, current_user.user_id)
 
 
@@ -71,6 +81,7 @@ async def generate_referral_link(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.generate_referral_link(db, current_user.user_id)
 
 
@@ -89,6 +100,7 @@ async def get_my_referrals(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_my_referrals(db, current_user.user_id, page, page_size)
 
 
@@ -97,6 +109,7 @@ async def get_referral_stats(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_referral_stats(db, current_user.user_id)
 
 
@@ -105,6 +118,7 @@ async def get_referral_metrics(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_referral_metrics(db, current_user.user_id)
 
 
@@ -116,6 +130,7 @@ async def get_wallet_balance(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_wallet_balance(db, current_user.user_id)
 
 
@@ -127,6 +142,7 @@ async def get_wallet_transactions(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_wallet_transactions(
         db,
         current_user.user_id,
@@ -142,6 +158,7 @@ async def get_monthly_summary(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _block_agencies(current_user)
     return await loyalty_svc.get_wallet_monthly_summary(db, current_user.user_id, months_back)
 
 

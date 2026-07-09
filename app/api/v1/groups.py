@@ -319,6 +319,13 @@ async def approve_member(
         member.joined_at = datetime.now(UTC)
     await db.flush()
 
+    # PRD trigger: send_group_chat_verification_email — fired here, not in
+    # join_group, because INTERESTED (join_group's status) doesn't actually
+    # grant chat access; APPROVED (this transition) does — see
+    # ACTIVE_CHAT_STATUSES in app/services/chat.py.
+    from app.workers.tasks import send_group_chat_verification_email_task
+    send_group_chat_verification_email_task.delay(member.user_id, group_id)
+
     user = await db.get(User, member.user_id)
     return GroupMemberResponse(
         id=member.id,

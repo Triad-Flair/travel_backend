@@ -302,3 +302,49 @@ async def send_offer_notification_email(to: str, plan_title: str, agency_name: s
     {_button("Review offer", settings.frontend_url)}
     """
     return await send_email(to, f"New offer on {plan_title}", _shell(f"{agency_name} sent you a new offer.", body))
+
+
+async def send_review_alert_email(to: str, name: str, reviewer_name: str, rating: float, comment: str | None) -> bool:
+    stars = "★" * max(0, min(5, round(rating))) + "☆" * (5 - max(0, min(5, round(rating))))
+    comment_html = f'<p style="margin:12px 0 0;font-style:italic;color:{COLOR_INK_SOFT};">&ldquo;{comment}&rdquo;</p>' if comment else ""
+    body = f"""
+    <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">You received a new review</h1>
+    <p style="margin:0;">Hi {name}, <strong>{reviewer_name}</strong> left you a review on {settings.app_name}.</p>
+    <p style="margin:12px 0 0;font-size:18px;color:{COLOR_PRIMARY};">{stars}</p>
+    {comment_html}
+    {_button("View review", settings.frontend_url)}
+    """
+    return await send_email(to, f"{reviewer_name} left you a review", _shell(f"{reviewer_name} reviewed you.", body))
+
+
+async def send_compliance_approval_email(to: str, name: str, agency_name: str) -> bool:
+    dashboard_url = f"{settings.frontend_url}/agency/dashboard"
+    body = f"""
+    <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">Verification approved</h1>
+    <p style="margin:0;">Hi {name}, <strong>{agency_name}</strong>'s GST and compliance documents have been
+    reviewed and approved. Your agency now shows a verified trust badge to travelers.</p>
+    {_button("Go to agency dashboard", dashboard_url)}
+    """
+    return await send_email(to, f"{agency_name} is now verified on {settings.app_name}", _shell(f"{agency_name}'s compliance verification is approved.", body))
+
+
+async def send_package_expiry_warning_email(to: str, name: str, package_title: str, expires_at: str, package_url: str) -> bool:
+    body = f"""
+    <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">A package is expiring soon</h1>
+    <p style="margin:0;">Hi {name}, your package <strong>{package_title}</strong> is set to expire on
+    <strong>{expires_at}</strong>. Extend it or update pricing/availability to keep it visible to travelers.</p>
+    {_button("Manage package", package_url)}
+    """
+    return await send_email(to, f"{package_title} expires soon", _shell(f"{package_title} expires on {expires_at}.", body))
+
+
+async def send_group_chat_verification_email(to: str, name: str, trip_title: str, group_chat_url: str) -> bool:
+    body = f"""
+    <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">You're in the group chat</h1>
+    <p style="margin:0;">Hi {name}, you're confirmed for <strong>{trip_title}</strong> and now have access to
+    the trip's group chat — coordinate plans, ask questions, and meet your fellow travelers.</p>
+    <p style="margin:16px 0 0;font-size:13px;color:{COLOR_MUTED};">
+    For your security, keep all communication, payments, and bookings on {settings.app_name}.</p>
+    {_button("Open group chat", group_chat_url)}
+    """
+    return await send_email(to, f"You're in — {trip_title} group chat", _shell(f"You now have access to the {trip_title} group chat.", body))

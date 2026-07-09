@@ -87,8 +87,8 @@ def _group_to_summary(group: Group) -> GroupSummary:
 def _offer_to_schema(offer: Offer) -> OfferInPlan | None:
     if not offer.agency:
         return None
-    from app.schemas.common import AgencySummary
-    agency = AgencySummary(
+    from app.schemas.common import AgencyPublicSummary
+    agency = AgencyPublicSummary(
         id=offer.agency.id,
         name=offer.agency.name,
         slug=offer.agency.slug,
@@ -238,6 +238,22 @@ async def get_plan_by_id(db: AsyncSession, plan_id: str) -> PlanDetails:
     if not plan:
         raise NotFoundError("Plan")
     return _plan_to_details(plan, plan.offers or [])
+
+
+async def confirm_plan_with_offer(db: AsyncSession, plan_id: str, user_id: str, offer_id: str) -> PlanDetails:
+    """Sanity-checks that the plan is actually confirmed with the given offer
+    before returning it. The real confirmation (offer -> ACCEPTED, Plan ->
+    CONFIRMED, Package + Group creation) happens in
+    services/offers.py::accept_offer — this endpoint no longer performs a
+    second, separate confirmation step."""
+    plan = await db.scalar(select(Plan).where(Plan.id == plan_id))
+    if not plan:
+        raise NotFoundError("Plan")
+    if plan.creator_id != user_id:
+        raise ForbiddenError("Only the plan creator can confirm this plan")
+    if plan.confirmed_offer_id != offer_id:
+        raise BadRequestError("This offer is not the plan's accepted offer")
+    return await get_plan_by_id(db, plan_id)
 
 
 async def list_my_plans(

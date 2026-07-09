@@ -23,6 +23,7 @@ class ChatMessageResponse(CamelModel):
     content: str | None = None
     metadata: dict | None = None
     created_at: str
+    flagged: bool = False
 
 
 class CreatePollRequest(CamelModel):
@@ -54,6 +55,7 @@ class DirectMessageResponse(CamelModel):
     content: str | None = None
     metadata: dict | None = None
     created_at: str
+    flagged: bool = False
 
 
 class ConversationResponse(CamelModel):
@@ -89,6 +91,33 @@ class SendDirectMessageRequest(CamelModel):
     content: str | None = None
     media_url: str | None = None
     metadata: dict | None = None
+
+
+class MessageAuditResponse(CamelModel):
+    """Admin-only — see app/api/v1/chat.py. Exposes the pre-redaction text
+    the normal chat endpoints never return."""
+    id: str
+    sender_id: str | None = None
+    flagged: bool
+    categories: list[str] = []
+    redacted_content: str | None = None
+    original_content: str | None = None
+    created_at: str
+
+
+class ModerationKeywordResponse(CamelModel):
+    id: str
+    keyword: str
+    is_active: bool
+    created_at: str
+
+
+class CreateModerationKeywordRequest(CamelModel):
+    keyword: str = Field(..., min_length=2, max_length=100)
+
+
+class UpdateModerationKeywordRequest(CamelModel):
+    is_active: bool
 
 
 class CreateConversationRequest(CamelModel):

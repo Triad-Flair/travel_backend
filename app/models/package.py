@@ -35,6 +35,12 @@ class Package(TimestampsMixin, BaseModel):
     status: Mapped[str] = mapped_column("status", PgEnum("DRAFT","OPEN","CONFIRMING","CONFIRMED","COMPLETED","EXPIRED","CANCELLED",name="PlanStatus",create_type=False), default="DRAFT", nullable=False, index=True)
     itinerary: Mapped[list | dict | None] = mapped_column("itinerary", JSONB, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column("expiresAt", DateTime(timezone=True), nullable=True)
+    source_offer_id: Mapped[str | None] = mapped_column(
+        "sourceOfferId", String(36), ForeignKey("offers.id"), nullable=True
+    )
+    expiry_warning_sent_at: Mapped[datetime | None] = mapped_column(
+        "expiryWarningSentAt", DateTime(timezone=True), nullable=True
+    )
 
     # Non-DB convenience attrs (no DB column)
     cover_image_url: str | None = None   # derived from first galleryUrls entry

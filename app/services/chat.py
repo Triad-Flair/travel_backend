@@ -6,9 +6,11 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.cache import CacheKeys, TTL_SHORT, get_cached, invalidate, set_cached
 from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.chat import (
     ChatMessage,
+    ChatModerationKeyword,
     DirectConversation,
     DirectConversationParticipant,
     DirectMessage,
@@ -18,23 +20,78 @@ from app.models.group import Group, GroupMember
 from app.models.offer import Offer
 from app.models.package import Package
 from app.models.plan import Plan
+from app.models.social import Notification
 from app.models.user import User
 from app.schemas.chat import (
     ChatMessageResponse,
     ConversationInboxItem,
     ConversationResponse,
+    CreateModerationKeywordRequest,
     CreatePollRequest,
     DirectMessageResponse,
     LastMessageSummary,
+    MessageAuditResponse,
+    ModerationKeywordResponse,
     PollResponse,
     SendDirectMessageRequest,
     SendMessageRequest,
+    UpdateModerationKeywordRequest,
 )
 from app.schemas.common import UserSummary
+from app.services.chat_moderation import ModerationResult, moderate
 from app.websockets.socketio_server import emit_to_conversation, emit_to_group, emit_to_user
 
 ACTIVE_CHAT_STATUSES = {"APPROVED", "COMMITTED"}
 ACTIVE_DIRECT_CONTEXT_STATUSES = {"INTERESTED", "APPROVED", "COMMITTED"}
+
+# Fire one compliance-reminder Notification (reusing the existing
+# notification system — see app/services/social.py for the same pattern)
+# the moment a sender's lifetime flagged-message count hits this number.
+# Exactly-equal (not >=) so it fires once, not on every message after.
+FLAGGED_MESSAGE_NOTIFICATION_THRESHOLD = 3
+
+
+async def _get_active_moderation_keywords(db: AsyncSession) -> list[str]:
+    cache_key = CacheKeys.chat_moderation_keywords()
+    cached = await get_cached(cache_key)
+    if cached is not None:
+        return cached
+    result = await db.execute(
+        select(ChatModerationKeyword.keyword).where(ChatModerationKeyword.is_active == True)
+    )
+    keywords = [row[0] for row in result.all()]
+    await set_cached(cache_key, keywords, TTL_SHORT)
+    return keywords
+
+
+async def _moderate_message(db: AsyncSession, content: str | None) -> ModerationResult:
+    keywords = await _get_active_moderation_keywords(db)
+    return moderate(content, keywords)
+
+
+async def _notify_if_repeated_leakage_attempts(db: AsyncSession, user_id: str) -> None:
+    group_count = await db.scalar(
+        select(func.count(ChatMessage.id)).where(ChatMessage.sender_id == user_id, ChatMessage.flagged == True)
+    ) or 0
+    direct_count = await db.scalar(
+        select(func.count(DirectMessage.id)).where(DirectMessage.sender_id == user_id, DirectMessage.flagged == True)
+    ) or 0
+    if int(group_count) + int(direct_count) != FLAGGED_MESSAGE_NOTIFICATION_THRESHOLD:
+        return
+    db.add(
+        Notification(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            type="compliance_reminder",
+            title="Keep communication on-platform",
+            body=(
+                "For your security, keep all communication, payments, and bookings on TripSync. "
+                "We've hidden some contact details you tried to share — this keeps you covered by our "
+                "trust and safety guarantees."
+            ),
+        )
+    )
+    await db.flush()
 
 
 def _to_iso(dt: datetime | None) -> str | None:
@@ -92,6 +149,7 @@ def _chat_message_response(message: ChatMessage, sender: User | None) -> ChatMes
         content=message.content,
         metadata=_parse_metadata(message.extra_data),
         created_at=message.created_at.isoformat(),
+        flagged=bool(message.flagged),
     )
 
 
@@ -104,6 +162,7 @@ def _direct_message_response(message: DirectMessage, sender: User | None) -> Dir
         content=message.content,
         metadata=None,
         created_at=message.created_at.isoformat(),
+        flagged=bool(message.flagged),
     )
 
 
@@ -295,16 +354,24 @@ async def send_group_message(
 ) -> ChatMessageResponse:
     await _assert_group_chat_access(db, group_id, user_id)
 
+    moderation = await _moderate_message(db, req.content)
+
     message = ChatMessage(
         id=str(uuid.uuid4()),
         group_id=group_id,
         sender_id=user_id,
         message_type=_message_type_to_db(req.message_type),
-        content=req.content,
+        content=moderation.redacted_text if moderation.flagged else req.content,
         extra_data=req.metadata if req.metadata else None,
+        original_content=req.content if moderation.flagged else None,
+        flagged=moderation.flagged,
+        flagged_categories=moderation.categories if moderation.flagged else None,
     )
     db.add(message)
     await db.flush()
+
+    if moderation.flagged:
+        await _notify_if_repeated_leakage_attempts(db, user_id)
 
     sender = await db.get(User, user_id)
     payload = _chat_message_response(message, sender)
@@ -701,16 +768,24 @@ async def send_direct_message(
     if not conversation:
         raise NotFoundError("Conversation")
 
+    moderation = await _moderate_message(db, req.content)
+
     message = DirectMessage(
         id=str(uuid.uuid4()),
         conversation_id=conv_id,
         sender_id=user_id,
-        content=req.content,
+        content=moderation.redacted_text if moderation.flagged else req.content,
+        original_content=req.content if moderation.flagged else None,
+        flagged=moderation.flagged,
+        flagged_categories=moderation.categories if moderation.flagged else None,
     )
     db.add(message)
 
     conversation.updated_at = datetime.now(UTC)
     await db.flush()
+
+    if moderation.flagged:
+        await _notify_if_repeated_leakage_attempts(db, user_id)
 
     sender = await db.get(User, user_id)
     payload = _direct_message_response(message, sender)
@@ -727,12 +802,15 @@ async def send_direct_message(
             "direct:message_created",
             payload.model_dump(by_alias=True),
         )
-        # Fire push/WhatsApp notification off the hot path — non-blocking
+        # Fire push/WhatsApp notification off the hot path — non-blocking.
+        # Uses message.content (redacted when flagged), never req.content —
+        # otherwise a redacted phone/email would leak straight back out
+        # through the WhatsApp preview.
         from app.workers.tasks import notify_direct_message
         notify_direct_message.delay(
             recipient_id=other_participant.user_id,
             sender_name=sender.display_name or sender.username if sender else "Someone",
-            content_preview=(req.content or "")[:60],
+            content_preview=(message.content or "")[:60],
         )
     await emit_to_conversation(
         conv_id,
@@ -747,3 +825,69 @@ async def mark_conversation_read(db: AsyncSession, conv_id: str, user_id: str) -
     participant.last_read_at = datetime.now(UTC)
     await db.flush()
     return {"ok": True}
+
+
+# ── Moderation audit + keyword management (admin only, see app/api/v1/chat.py) ──
+
+async def get_message_audit(db: AsyncSession, message_id: str) -> MessageAuditResponse:
+    """Only reachable via an admin-gated route. original_content is never
+    exposed by the normal chat endpoints."""
+    message = await db.get(ChatMessage, message_id)
+    if not message:
+        message = await db.get(DirectMessage, message_id)
+    if not message:
+        raise NotFoundError("Message")
+
+    return MessageAuditResponse(
+        id=message.id,
+        sender_id=message.sender_id,
+        flagged=bool(message.flagged),
+        categories=message.flagged_categories or [],
+        redacted_content=message.content,
+        original_content=message.original_content,
+        created_at=message.created_at.isoformat(),
+    )
+
+
+async def list_moderation_keywords(db: AsyncSession) -> list[ModerationKeywordResponse]:
+    result = await db.execute(select(ChatModerationKeyword).order_by(ChatModerationKeyword.keyword.asc()))
+    return [
+        ModerationKeywordResponse(
+            id=k.id, keyword=k.keyword, is_active=k.is_active, created_at=k.created_at.isoformat()
+        )
+        for k in result.scalars().all()
+    ]
+
+
+async def create_moderation_keyword(
+    db: AsyncSession, req: CreateModerationKeywordRequest
+) -> ModerationKeywordResponse:
+    cleaned = req.keyword.strip().lower()
+    existing = await db.scalar(select(ChatModerationKeyword).where(ChatModerationKeyword.keyword == cleaned))
+    if existing:
+        raise BadRequestError("This keyword is already in the list")
+
+    keyword = ChatModerationKeyword(id=str(uuid.uuid4()), keyword=cleaned, is_active=True)
+    db.add(keyword)
+    await db.flush()
+    await invalidate(CacheKeys.chat_moderation_keywords())
+    return ModerationKeywordResponse(
+        id=keyword.id, keyword=keyword.keyword, is_active=keyword.is_active,
+        created_at=keyword.created_at.isoformat(),
+    )
+
+
+async def update_moderation_keyword(
+    db: AsyncSession, keyword_id: str, req: UpdateModerationKeywordRequest
+) -> ModerationKeywordResponse:
+    keyword = await db.get(ChatModerationKeyword, keyword_id)
+    if not keyword:
+        raise NotFoundError("Keyword")
+
+    keyword.is_active = req.is_active
+    await db.flush()
+    await invalidate(CacheKeys.chat_moderation_keywords())
+    return ModerationKeywordResponse(
+        id=keyword.id, keyword=keyword.keyword, is_active=keyword.is_active,
+        created_at=keyword.created_at.isoformat(),
+    )

@@ -365,4 +365,8 @@ async def submit_review_endpoint(
     if not reviewer:
         raise NotFoundError("Reviewer")
 
+    # PRD trigger: send_review_alert_email — notify whoever was reviewed.
+    from app.workers.tasks import send_review_alert_email_task
+    send_review_alert_email_task.delay(review.id)
+
     return _review_record(review, reviewer, target_agency, target_user)

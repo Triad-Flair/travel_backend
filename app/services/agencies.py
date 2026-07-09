@@ -20,7 +20,7 @@ from app.schemas.agencies import (
     GstVerifyResponse,
     UpdateAgencyRequest,
 )
-from app.schemas.common import AgencySummary
+from app.schemas.common import AgencyPublicSummary, AgencySummary
 
 
 def _parse_json_list(raw: object) -> list | None:
@@ -44,6 +44,9 @@ def _parse_json_list(raw: object) -> list | None:
 
 
 def _agency_to_summary(agency: Agency) -> AgencySummary:
+    """Full summary including GST/PAN — only for authenticated owner/member
+    contexts (submit_verification, or the owner branch of get_agency_by_slug).
+    Never return this from a public/unauthenticated route."""
     return AgencySummary(
         id=agency.id,
         name=agency.name,
@@ -51,8 +54,33 @@ def _agency_to_summary(agency: Agency) -> AgencySummary:
         logo_url=agency.logo_url,
         description=agency.description,
         verification=agency.verification_status,
+        verification_rejection_reason=agency.verification_rejection_reason,
         gstin=agency.gstin,
         pan=agency.pan,
+        tourism_license=agency.tourism_license,
+        address=agency.address,
+        phone=agency.phone,
+        email=agency.email,
+        city=agency.city,
+        state=agency.state,
+        specializations=_parse_json_list(agency.specializations),
+        destinations=_parse_json_list(agency.destinations),
+        avg_rating=agency.avg_rating,
+        total_reviews=agency.review_count,
+        total_trips=agency.total_trips,
+    )
+
+
+def _agency_to_public_summary(agency: Agency) -> AgencyPublicSummary:
+    """GST/PAN-free summary for public/unauthenticated routes (browse, and the
+    non-owner branch of get_agency_by_slug)."""
+    return AgencyPublicSummary(
+        id=agency.id,
+        name=agency.name,
+        slug=agency.slug,
+        logo_url=agency.logo_url,
+        description=agency.description,
+        verification=agency.verification_status,
         tourism_license=agency.tourism_license,
         address=agency.address,
         phone=agency.phone,
@@ -101,7 +129,7 @@ async def browse_agencies(
     destination: str | None,
     page: int,
     page_size: int,
-) -> tuple[list[AgencySummary], int]:
+) -> tuple[list[AgencyPublicSummary], int]:
     q = select(Agency).where(Agency.is_active == True)
     if city:
         q = q.where(Agency.city.ilike(f"%{city}%"))
@@ -116,15 +144,32 @@ async def browse_agencies(
     result = await db.execute(
         q.order_by(Agency.avg_rating.desc()).offset((page - 1) * page_size).limit(page_size)
     )
-    return [_agency_to_summary(a) for a in result.scalars().all()], total
+    return [_agency_to_public_summary(a) for a in result.scalars().all()], total
 
 
-async def get_agency_by_slug(db: AsyncSession, slug: str) -> dict:
-    """Returns AgencySummary + packages + reviewsReceived."""
+async def _requester_has_agency_access(db: AsyncSession, agency: Agency, requesting_user_id: str) -> bool:
+    if agency.owner_id == requesting_user_id:
+        return True
+    member = await db.scalar(
+        select(AgencyMember).where(
+            AgencyMember.agency_id == agency.id,
+            AgencyMember.user_id == requesting_user_id,
+            AgencyMember.is_active == True,
+        )
+    )
+    return member is not None
+
+
+async def get_agency_by_slug(db: AsyncSession, slug: str, requesting_user_id: str | None = None) -> dict:
+    """Returns packages + reviewsReceived, plus either the full AgencySummary
+    (GST/PAN included) if the requester owns/belongs to this agency, or the
+    GST/PAN-free AgencyPublicSummary for everyone else. The public variant is
+    the only one cached — the owner variant is per-user and computed fresh."""
     cache_key = CacheKeys.agency_by_slug(slug)
-    cached_val = await get_cached(cache_key)
-    if cached_val:
-        return cached_val
+    if not requesting_user_id:
+        cached_val = await get_cached(cache_key)
+        if cached_val:
+            return cached_val
 
     result = await db.execute(
         select(Agency).where(Agency.slug == slug, Agency.is_active == True)
@@ -132,6 +177,10 @@ async def get_agency_by_slug(db: AsyncSession, slug: str) -> dict:
     agency = result.scalar_one_or_none()
     if not agency:
         raise NotFoundError("Agency")
+
+    is_owner_context = bool(
+        requesting_user_id and await _requester_has_agency_access(db, agency, requesting_user_id)
+    )
 
     from app.models.package import Package
     from app.services.packages import _pkg_to_details
@@ -165,12 +214,14 @@ async def get_agency_by_slug(db: AsyncSession, slug: str) -> dict:
             } if r.reviewer else None,
         })
 
+    summary = _agency_to_summary(agency) if is_owner_context else _agency_to_public_summary(agency)
     data = {
-        **_agency_to_summary(agency).model_dump(by_alias=True),
+        **summary.model_dump(by_alias=True),
         "packages": packages,
         "reviewsReceived": reviews,
     }
-    await set_cached(cache_key, data, TTL_MEDIUM)
+    if not requesting_user_id:
+        await set_cached(cache_key, data, TTL_MEDIUM)
     return data
 
 
@@ -284,7 +335,51 @@ async def submit_verification(
             setattr(agency, field, payload[field])
 
     agency.verification_status = "under_review"
+    agency.verification_rejection_reason = None
     await db.flush()
+    return _agency_to_summary(agency)
+
+
+async def list_pending_verification_agencies(db: AsyncSession) -> list[AgencySummary]:
+    """Admin-only (see require_admin() in app/api/v1/agencies.py). Feeds the
+    minimal admin review queue — agencies currently awaiting a decision."""
+    result = await db.execute(
+        select(Agency)
+        .where(Agency.verification_status == "under_review")
+        .order_by(Agency.created_at.asc())
+    )
+    return [_agency_to_summary(a) for a in result.scalars().all()]
+
+
+async def approve_verification(db: AsyncSession, agency_id: str) -> AgencySummary:
+    """Admin-only (see require_admin() in app/api/v1/agencies.py). Previously
+    there was no way for verification_status to ever leave 'under_review' —
+    submit_verification set it, but nothing ever approved it."""
+    agency = await db.scalar(select(Agency).where(Agency.id == agency_id))
+    if not agency:
+        raise NotFoundError("Agency")
+
+    agency.verification_status = "verified"
+    agency.verification_rejection_reason = None
+    await db.flush()
+    await invalidate(CacheKeys.agency_by_slug(agency.slug))
+
+    # PRD trigger: send_compliance_approval_email
+    from app.workers.tasks import send_compliance_approval_email_task
+    send_compliance_approval_email_task.delay(agency.id)
+
+    return _agency_to_summary(agency)
+
+
+async def reject_verification(db: AsyncSession, agency_id: str, reason: str | None) -> AgencySummary:
+    agency = await db.scalar(select(Agency).where(Agency.id == agency_id))
+    if not agency:
+        raise NotFoundError("Agency")
+
+    agency.verification_status = "rejected"
+    agency.verification_rejection_reason = reason
+    await db.flush()
+    await invalidate(CacheKeys.agency_by_slug(agency.slug))
     return _agency_to_summary(agency)
 
 
@@ -312,6 +407,7 @@ async def get_bank_record(db: AsyncSession, agency_id: str, user_id: str) -> dic
         "bankName": bank.bank_name,
         "maskedAccountNumber": _mask_account(bank.account_number_encrypted),
         "ifscCode": bank.ifsc_code,
+        "razorpayAccountId": bank.razorpay_account_id,
         "verificationStatus": "VERIFIED" if bank.is_verified else "PENDING",
         "nameMatchScore": 100 if bank.is_verified else None,
         "nameMatchPassed": bool(bank.is_verified),
@@ -337,6 +433,10 @@ async def verify_bank_account(
     ifsc_code = str(payload.get("ifscCode") or "").strip().upper()
     account_holder_name = str(payload.get("accountHolderName") or "").strip()
     bank_name = str(payload.get("bankName") or "").strip() or None
+    # Razorpay Route linked account id (e.g. "acc_...") — set once the agency
+    # has been onboarded through Razorpay's own Linked Account/KYC flow,
+    # which is separate from (and not built as part of) this endpoint.
+    razorpay_account_id = str(payload.get("razorpayAccountId") or "").strip() or None
 
     if not account_number or not ifsc_code or not account_holder_name:
         raise BadRequestError("Account number, IFSC code, and account holder name are required")
@@ -350,6 +450,7 @@ async def verify_bank_account(
             ifsc_code=ifsc_code,
             account_holder_name=account_holder_name,
             bank_name=bank_name,
+            razorpay_account_id=razorpay_account_id,
             is_verified=True,
         )
         db.add(bank)
@@ -358,6 +459,8 @@ async def verify_bank_account(
         bank.ifsc_code = ifsc_code
         bank.account_holder_name = account_holder_name
         bank.bank_name = bank_name
+        if razorpay_account_id:
+            bank.razorpay_account_id = razorpay_account_id
         bank.is_verified = True
 
     await db.flush()
@@ -368,6 +471,7 @@ async def verify_bank_account(
         "bankName": bank.bank_name,
         "maskedAccountNumber": _mask_account(bank.account_number_encrypted),
         "ifscCode": bank.ifsc_code,
+        "razorpayAccountId": bank.razorpay_account_id,
         "verificationStatus": "VERIFIED",
         "nameMatchScore": 100,
         "nameMatchPassed": True,

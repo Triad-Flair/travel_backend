@@ -69,7 +69,7 @@ def _build_user_in_session(user: User, agency=None) -> UserInSession:
 
 
 def _build_session(user: User, agency_id: str | None = None, agency=None) -> AuthSessionResponse:
-    role = "agency_admin" if agency_id else "user"
+    role = "platform_admin" if user.is_platform_admin else ("agency_admin" if agency_id else "user")
     payload = {"sub": user.id, "role": role}
     if agency_id:
         payload["agencyId"] = agency_id
@@ -163,7 +163,8 @@ async def signup_traveler(db: AsyncSession, req: TravelerSignupRequest) -> Signu
 
     if email:
         verification_token = _issue_email_verification_token(user)
-        await send_verification_email(email, req.full_name, verification_token)
+        from app.workers.tasks import send_registration_email_task
+        send_registration_email_task.delay(user.id, verification_token)
         return SignupMessageResponse(message="Account created. Please verify your email before signing in.")
 
     user.email_verified = True
@@ -172,12 +173,15 @@ async def signup_traveler(db: AsyncSession, req: TravelerSignupRequest) -> Signu
 
 async def signup_agency_owner(db: AsyncSession, req: AgencySignupRequest) -> SignupMessageResponse:
     from app.models.agency import Agency, AgencyMember, AgencyWallet
+    from app.services.locations import validate_state_name
 
     username = req.username.strip().lower()
     email = req.email.strip().lower()
     phone = req.phone.strip() if req.phone else None
     agency_email = req.agency_email.strip().lower() if req.agency_email else None
     agency_phone = req.agency_phone.strip() if req.agency_phone else None
+
+    await validate_state_name(db, req.agency_state)
 
     if await db.scalar(select(User).where(func.lower(User.email) == email)):
         raise ConflictError("Email already registered")
@@ -229,7 +233,8 @@ async def signup_agency_owner(db: AsyncSession, req: AgencySignupRequest) -> Sig
     await db.flush()
 
     verification_token = _issue_email_verification_token(user)
-    await send_verification_email(email, req.full_name, verification_token)
+    from app.workers.tasks import send_registration_email_task
+    send_registration_email_task.delay(user.id, verification_token)
 
     return SignupMessageResponse(message="Agency account created. Please verify your email before signing in.")
 

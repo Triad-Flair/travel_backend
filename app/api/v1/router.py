@@ -7,6 +7,7 @@ from app.api.v1 import (
     discover,
     groups,
     invoices,
+    locations,
     notifications,
     offers,
     packages,
@@ -35,6 +36,7 @@ v1_router.include_router(discover.router)
 v1_router.include_router(notifications.router)
 v1_router.include_router(social.router)
 v1_router.include_router(invoices.router)
+v1_router.include_router(locations.router)
 v1_router.include_router(loyalty_router)
 v1_router.include_router(router_referrals)
 v1_router.include_router(router_wallet)

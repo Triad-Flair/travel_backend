@@ -17,6 +17,12 @@ class ChatMessage(CreatedAtMixin, BaseModel):
     message_type: Mapped[str] = mapped_column("messageType", String(20), default="TEXT", nullable=False)
     content: Mapped[str | None] = mapped_column("content", Text, nullable=True)
     extra_data: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    # Anti-leakage moderation (PRD 2.2) — see app/services/chat_moderation.py.
+    # original_content is only ever populated when flagged=True, and is only
+    # readable via the admin-only audit endpoint.
+    original_content: Mapped[str | None] = mapped_column("originalContent", Text, nullable=True)
+    flagged: Mapped[bool] = mapped_column("flagged", Boolean, default=False, nullable=False)
+    flagged_categories: Mapped[list | None] = mapped_column("flaggedCategories", JSONB, nullable=True)
 
     group = relationship("Group", back_populates="messages")
     sender = relationship("User", lazy="noload", foreign_keys=[sender_id],
@@ -56,10 +62,24 @@ class DirectMessage(CreatedAtMixin, BaseModel):
     conversation_id: Mapped[str] = mapped_column("conversationId", String(36), ForeignKey("direct_conversations.id"), nullable=False, index=True)
     sender_id: Mapped[str] = mapped_column("senderId", String(36), ForeignKey("users.id"), nullable=False)
     content: Mapped[str | None] = mapped_column("content", Text, nullable=True)
+    original_content: Mapped[str | None] = mapped_column("originalContent", Text, nullable=True)
+    flagged: Mapped[bool] = mapped_column("flagged", Boolean, default=False, nullable=False)
+    flagged_categories: Mapped[list | None] = mapped_column("flaggedCategories", JSONB, nullable=True)
 
     conversation = relationship("DirectConversation", back_populates="messages")
     sender = relationship("User", lazy="noload", foreign_keys=[sender_id],
                           primaryjoin="DirectMessage.sender_id == User.id")
+
+
+class ChatModerationKeyword(CreatedAtMixin, BaseModel):
+    """Config-driven platform-leakage keyword list (PRD 2.2) — editable by
+    admins via app/api/v1/chat.py without a redeploy. See
+    app/services/chat_moderation.py for how this feeds the detector."""
+    __tablename__ = "chat_moderation_keywords"
+    __table_args__ = {"extend_existing": True}
+
+    keyword: Mapped[str] = mapped_column("keyword", String(100), nullable=False, unique=True)
+    is_active: Mapped[bool] = mapped_column("isActive", Boolean, default=True, nullable=False)
 
 
 class Poll(TimestampsMixin, BaseModel):

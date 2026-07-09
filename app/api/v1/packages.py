@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user
+from app.schemas.groups import GroupSummaryResponse
 from app.schemas.packages import CreatePackageRequest, PackageCardResponse, PackageDetails, UpdatePackageRequest
 from app.services import packages as pkg_svc
 
@@ -68,3 +69,15 @@ async def publish(
 ):
     agency_id = current_user.require_agency()
     return await pkg_svc.publish_package(db, pkg_id, agency_id)
+
+
+@router.post("/{pkg_id}/book", response_model=GroupSummaryResponse, status_code=201)
+async def book(
+    pkg_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Instant checkout entry point (PRD 3): no intermediate confirm step —
+    creates/joins the package's Group directly, ready for
+    GET /payments/groups/{group_id}/checkout right after."""
+    return await pkg_svc.book_package(db, pkg_id, current_user.user_id)

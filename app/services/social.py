@@ -771,6 +771,10 @@ async def get_following(db: AsyncSession, handle: str, page: int, page_size: int
 
 
 async def submit_review(db: AsyncSession, user_id: str, req: SubmitReviewRequest) -> ReviewResponse:
+    """Not currently reachable from any router — the live review endpoint is
+    POST /reviews in app/api/v1/reviews.py (submit_review_endpoint), which
+    has its own inline Review-creation logic. send_review_alert_email is
+    wired there, not here."""
     group = await db.scalar(select(Group).where(Group.id == req.group_id))
     if not group:
         raise NotFoundError("Group")

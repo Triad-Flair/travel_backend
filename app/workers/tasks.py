@@ -207,3 +207,304 @@ def send_whatsapp_notification(phone: str, template_id: str, params: list[str]):
         resp.raise_for_status()
     except Exception as exc:
         logger.error("WhatsApp notification failed to %s: %s", phone, exc)
+
+
+# ── Email automation hooks (PRD section 5) ───────────────────────────────────
+# Each task re-opens its own DB session (Celery workers don't share the
+# FastAPI request's session) and re-fetches whatever it needs by id, matching
+# the pattern already used above (check_expired_plans etc).
+
+@celery_app.task(name="app.workers.tasks.send_registration_email", bind=True, max_retries=3)
+def send_registration_email_task(self, user_id: str, verification_token: str):
+    async def _task():
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_verification_email
+        from app.models.user import User
+
+        async with AsyncSessionLocal() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                # Most likely the caller's transaction hasn't committed yet —
+                # retry rather than silently dropping the email.
+                raise LookupError(f"User {user_id} not found (yet)")
+            if not user.email:
+                return
+            await send_verification_email(
+                user.email, user.display_name or user.username or "Traveler", verification_token
+            )
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_registration_email failed for user %s: %s", user_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.send_transactional_invoice_email", bind=True, max_retries=3)
+def send_transactional_invoice_email_task(self, payment_id: str):
+    async def _task():
+        from app.config import settings
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_payment_receipt_email
+        from app.models.payment import Payment
+        from app.models.user import User
+        from app.services import invoices as inv_svc
+
+        async with AsyncSessionLocal() as db:
+            payment = await db.get(Payment, payment_id)
+            if not payment:
+                raise LookupError(f"Payment {payment_id} not found (yet)")
+            traveler = await db.get(User, payment.user_id)
+            if not traveler:
+                raise LookupError(f"User {payment.user_id} not found (yet)")
+            if not traveler.email:
+                return
+            invoice = await inv_svc._ensure_invoice(db, payment)
+            ctx = await inv_svc._trip_context(db, payment)
+            trip = ctx["plan"] or ctx["package"]
+            if not trip:
+                return
+            await send_payment_receipt_email(
+                traveler.email,
+                traveler.display_name or traveler.username or "Traveler",
+                invoice.invoice_number,
+                trip.title,
+                f"{settings.frontend_url}/dashboard/invoices/{payment.id}",
+                int(payment.amount or 0),
+            )
+            await db.commit()
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_transactional_invoice_email failed for payment %s: %s", payment_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.send_bid_alert_email", bind=True, max_retries=3)
+def send_bid_alert_email_task(self, offer_id: str):
+    async def _task():
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_offer_notification_email
+        from app.models.agency import Agency
+        from app.models.offer import Offer
+        from app.models.plan import Plan
+        from app.models.user import User
+
+        async with AsyncSessionLocal() as db:
+            offer = await db.get(Offer, offer_id)
+            if not offer:
+                raise LookupError(f"Offer {offer_id} not found (yet)")
+            plan = await db.get(Plan, offer.plan_id)
+            if not plan:
+                raise LookupError(f"Plan {offer.plan_id} not found")
+            agency = await db.get(Agency, offer.agency_id)
+            if not agency:
+                raise LookupError(f"Agency {offer.agency_id} not found")
+            creator = await db.get(User, plan.creator_id)
+            if not creator or not creator.email:
+                return
+            await send_offer_notification_email(creator.email, plan.title, agency.name)
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_bid_alert_email failed for offer %s: %s", offer_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.send_review_alert_email", bind=True, max_retries=3)
+def send_review_alert_email_task(self, review_id: str):
+    async def _task():
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_review_alert_email
+        from app.models.agency import Agency
+        from app.models.social import Review
+        from app.models.user import User
+
+        async with AsyncSessionLocal() as db:
+            review = await db.get(Review, review_id)
+            if not review:
+                raise LookupError(f"Review {review_id} not found (yet)")
+            reviewer = await db.get(User, review.reviewer_id)
+            reviewer_name = (reviewer.display_name or reviewer.username or "Someone") if reviewer else "Someone"
+
+            if review.review_type == "agency" and review.target_agency_id:
+                agency = await db.get(Agency, review.target_agency_id)
+                if not agency or not agency.owner_id:
+                    return
+                owner = await db.get(User, agency.owner_id)
+                if not owner or not owner.email:
+                    return
+                await send_review_alert_email(
+                    owner.email, owner.display_name or owner.username or agency.name,
+                    reviewer_name, float(review.overall_rating or 0), review.comment,
+                )
+            elif review.target_user_id:
+                target = await db.get(User, review.target_user_id)
+                if not target or not target.email:
+                    return
+                await send_review_alert_email(
+                    target.email, target.display_name or target.username or "there",
+                    reviewer_name, float(review.overall_rating or 0), review.comment,
+                )
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_review_alert_email failed for review %s: %s", review_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.send_compliance_approval_email", bind=True, max_retries=3)
+def send_compliance_approval_email_task(self, agency_id: str):
+    async def _task():
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_compliance_approval_email
+        from app.models.agency import Agency
+        from app.models.user import User
+
+        async with AsyncSessionLocal() as db:
+            agency = await db.get(Agency, agency_id)
+            if not agency:
+                raise LookupError(f"Agency {agency_id} not found (yet)")
+            if not agency.owner_id:
+                return
+            owner = await db.get(User, agency.owner_id)
+            if not owner or not owner.email:
+                return
+            await send_compliance_approval_email(
+                owner.email, owner.display_name or owner.username or agency.name, agency.name
+            )
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_compliance_approval_email failed for agency %s: %s", agency_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.send_package_expiry_warning_email", bind=True, max_retries=3)
+def send_package_expiry_warning_email_task(self, package_id: str):
+    async def _task():
+        from app.config import settings
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_package_expiry_warning_email
+        from app.models.agency import Agency
+        from app.models.package import Package
+        from app.models.user import User
+
+        async with AsyncSessionLocal() as db:
+            package = await db.get(Package, package_id)
+            if not package or not package.expires_at:
+                return
+            agency = await db.get(Agency, package.agency_id)
+            if not agency or not agency.owner_id:
+                return
+            owner = await db.get(User, agency.owner_id)
+            if not owner or not owner.email:
+                return
+            await send_package_expiry_warning_email(
+                owner.email,
+                owner.display_name or owner.username or agency.name,
+                package.title,
+                package.expires_at.date().isoformat(),
+                f"{settings.frontend_url}/agency/packages/{package.id}",
+            )
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_package_expiry_warning_email failed for package %s: %s", package_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.check_package_expiry_warnings", bind=True, max_retries=3)
+def check_package_expiry_warnings(self, warning_window_days: int = 3):
+    """Beat-scheduled (see app/celery_app.py) — finds OPEN packages expiring
+    within warning_window_days that haven't been warned about yet, marks
+    them, and fans out one send_package_expiry_warning_email task per
+    package. Lifecycle Hook (PRD section 5)."""
+    async def _task():
+        from datetime import timedelta
+
+        from sqlalchemy import select, update
+
+        from app.database import AsyncSessionLocal
+        from app.models.package import Package
+
+        now = datetime.now(UTC)
+        cutoff = now + timedelta(days=warning_window_days)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Package.id).where(
+                    Package.status == "OPEN",
+                    Package.expires_at.isnot(None),
+                    Package.expires_at <= cutoff,
+                    Package.expires_at > now,
+                    Package.expiry_warning_sent_at.is_(None),
+                )
+            )
+            package_ids = [row[0] for row in result.all()]
+            if not package_ids:
+                return
+
+            await db.execute(
+                update(Package)
+                .where(Package.id.in_(package_ids))
+                .values(expiry_warning_sent_at=now)
+            )
+            await db.commit()
+
+        for package_id in package_ids:
+            send_package_expiry_warning_email_task.delay(package_id)
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("check_package_expiry_warnings failed: %s", exc)
+        raise self.retry(exc=exc, countdown=60)
+
+
+@celery_app.task(name="app.workers.tasks.send_group_chat_verification_email", bind=True, max_retries=3)
+def send_group_chat_verification_email_task(self, user_id: str, group_id: str):
+    async def _task():
+        from app.config import settings
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_group_chat_verification_email
+        from app.models.group import Group
+        from app.models.package import Package
+        from app.models.plan import Plan
+        from app.models.user import User
+
+        async with AsyncSessionLocal() as db:
+            group = await db.get(Group, group_id)
+            if not group:
+                # Newly created by accept_offer/book_package — the caller's
+                # transaction may not have committed yet. Retry.
+                raise LookupError(f"Group {group_id} not found (yet)")
+            user = await db.get(User, user_id)
+            if not user or not user.email:
+                return
+            trip_title = None
+            if group.plan_id:
+                plan = await db.get(Plan, group.plan_id)
+                trip_title = plan.title if plan else None
+            if not trip_title and group.package_id:
+                package = await db.get(Package, group.package_id)
+                trip_title = package.title if package else None
+            if not trip_title:
+                return
+            await send_group_chat_verification_email(
+                user.email,
+                user.display_name or user.username or "there",
+                trip_title,
+                f"{settings.frontend_url}/dashboard/groups/{group.id}/chat",
+            )
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_group_chat_verification_email failed for user %s / group %s: %s", user_id, group_id, exc)
+        raise self.retry(exc=exc, countdown=30)

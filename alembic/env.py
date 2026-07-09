@@ -16,11 +16,13 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override with env-based URL — use SYNC url for migrations
-config.set_main_option(
-    "sqlalchemy.url",
-    settings.sync_database_url or settings.database_url.replace("+asyncpg", ""),
-)
+# Override with env-based URL. run_migrations_online() below uses
+# async_engine_from_config, so this must be an asyncpg-compatible URL —
+# settings.async_database_url handles the "+asyncpg" scheme and credential
+# URL-encoding regardless of how DATABASE_URL is formatted in .env.
+# "%" is escaped to "%%" because configparser (which backs alembic's Config)
+# treats "%" as interpolation syntax, and URL-encoded credentials contain it.
+config.set_main_option("sqlalchemy.url", settings.async_database_url.replace("%", "%%"))
 
 # Import all models so Alembic can detect them
 import app.models  # noqa: F401

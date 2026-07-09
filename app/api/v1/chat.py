@@ -8,11 +8,15 @@ from app.schemas.chat import (
     ConversationInboxItem,
     ConversationResponse,
     CreateConversationRequest,
+    CreateModerationKeywordRequest,
     CreatePollRequest,
     DirectMessageResponse,
+    MessageAuditResponse,
+    ModerationKeywordResponse,
     PollResponse,
     SendDirectMessageRequest,
     SendMessageRequest,
+    UpdateModerationKeywordRequest,
     VotePollRequest,
 )
 from app.services import chat as chat_svc
@@ -113,6 +117,48 @@ async def mark_read(
     db: AsyncSession = Depends(get_db),
 ):
     return await chat_svc.mark_conversation_read(db, conv_id, current_user.user_id)
+
+
+# ── Moderation audit + keyword management (admin only) ──────────────────────
+
+@router.get("/messages/{message_id}/audit", response_model=MessageAuditResponse)
+async def message_audit(
+    message_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await chat_svc.get_message_audit(db, message_id)
+
+
+@router.get("/moderation/keywords", response_model=list[ModerationKeywordResponse])
+async def list_keywords(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await chat_svc.list_moderation_keywords(db)
+
+
+@router.post("/moderation/keywords", response_model=ModerationKeywordResponse, status_code=201)
+async def add_keyword(
+    req: CreateModerationKeywordRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await chat_svc.create_moderation_keyword(db, req)
+
+
+@router.patch("/moderation/keywords/{keyword_id}", response_model=ModerationKeywordResponse)
+async def update_keyword(
+    keyword_id: str,
+    req: UpdateModerationKeywordRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await chat_svc.update_moderation_keyword(db, keyword_id, req)
 
 
 # Real-time handled by Socket.IO server mounted at /socket.io in main.py

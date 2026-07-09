@@ -12,6 +12,23 @@ from app.models.payment import Invoice, Payment
 from app.models.plan import Plan
 from app.models.user import User
 from app.exceptions import ForbiddenError, NotFoundError
+from app.schemas.invoices import (
+    AgencySettlementResponse,
+    InvoiceAgencyInfo,
+    InvoiceClientInfo,
+    InvoiceDiscountLine,
+    InvoiceLineItem,
+    InvoiceSummary,
+    InvoiceTravelerInfo,
+    InvoiceTripInfo,
+    PayoutScheduleItem,
+    PlatformInfo,
+    SettlementInfo,
+    SettlementPaymentInfo,
+    SettlementTripInfo,
+    UserInvoiceResponse,
+    UserPaymentInfo,
+)
 
 PLATFORM_INFO = {
     "name": "TripSync",
@@ -260,7 +277,7 @@ async def list_agency_invoices(db: AsyncSession, agency_id: str) -> list[dict]:
     return items
 
 
-async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesting_user_id: str) -> dict:
+async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesting_user_id: str) -> UserInvoiceResponse:
     payment = await _resolve_payment(db, payment_id)
     if payment.user_id != requesting_user_id:
         raise ForbiddenError("Access denied")
@@ -284,7 +301,6 @@ async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesti
     trip_amount = int(payment.trip_amount or (payment.amount - int(payment.platform_fee_amount or 0) - int(payment.fee_gst_amount or 0)))
     platform_fee_amount = int(payment.platform_fee_amount or 0)
     fee_gst_amount = int(payment.fee_gst_amount or 0)
-    commission_amount = int(payment.commission_amount or 0)
     points_redeemed = int(payment.points_redeemed or 0)
     wallet_amount_used = int(payment.wallet_amount_used or 0)
 
@@ -294,107 +310,91 @@ async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesti
     grand_total = int(payment.amount)
 
     per_person_rate = int(trip_amount / traveler_count) if traveler_count > 0 else trip_amount
-    agency_net = trip_amount - commission_amount
     discount_lines = []
     if points_redeemed > 0:
         discount_lines.append(
-            {"label": f"Loyalty Points Redeemed ({points_redeemed} pts × ₹1)", "amount": -points_discount}
+            InvoiceDiscountLine(label=f"Loyalty Points Redeemed ({points_redeemed} pts × ₹1)", amount=-points_discount)
         )
     if wallet_amount_used > 0:
-        discount_lines.append({"label": "TripSync Wallet Credit Applied", "amount": -wallet_discount})
+        discount_lines.append(InvoiceDiscountLine(label="TripSync Wallet Credit Applied", amount=-wallet_discount))
 
-    return {
-        "invoiceType": "USER_PAYMENT",
-        "invoiceNumber": invoice.invoice_number,
-        "issuedAt": _iso(payment.paid_at or invoice.created_at),
-        "status": payment.status,
-        "escrowStatus": payment.escrow_status,
-        "platform": PLATFORM_INFO,
-        "traveler": {
-            "name": (traveler.display_name or traveler.username or "Traveler") if traveler else "Traveler",
-            "email": traveler.email if traveler else "",
-            "phone": traveler.phone if traveler else None,
-            "city": traveler.location if traveler else "",
-        },
-        "agency": {
-            "name": agency.name,
-            "gstin": agency.gstin or "Pending verification",
-            "pan": agency.pan or "",
-            "address": ", ".join([p for p in [agency.address, agency.city, agency.state] if p]),
-            "email": agency.email or "",
-            "phone": agency.phone or "",
-            "logoUrl": agency.logo_url,
-        } if agency else None,
-        "trip": {
-            "title": trip_title,
-            "destination": destination,
-            "startDate": start_date,
-            "endDate": end_date,
-            "travelerCount": traveler_count,
-            "pricePerPerson": int(offer.price_per_person * 100) if offer else per_person_rate,
-            "inclusions": [],
-            "cancellationPolicy": (offer.cancellation_policy if offer else (package.cancellation_policy if package else "Standard policy")) or "Standard policy",
-            "planType": plan.plan_type if plan else "STANDARD",
-            "accommodation": (plan.accommodation if plan else package.accommodation if package else None),
-            "vibes": [],
-        },
-        "lineItems": [
-            {
-                "description": f"{trip_title} — {destination}",
-                "subtext": f"{start_date or 'TBD'} → {end_date or 'TBD'}",
-                "qty": traveler_count,
-                "unit": "person",
-                "rate": per_person_rate,
-                "subtotal": trip_amount,
-            },
-            {
-                "description": "TripSync Platform Fee (GST extra)",
-                "subtext": "Platform service fee",
-                "qty": 1,
-                "unit": "fixed",
-                "rate": platform_fee_amount + fee_gst_amount,
-                "subtotal": platform_fee_amount + fee_gst_amount,
-            },
+    return UserInvoiceResponse(
+        invoice_number=invoice.invoice_number,
+        issued_at=_iso(payment.paid_at or invoice.created_at),
+        status=payment.status,
+        escrow_status=payment.escrow_status,
+        platform=PlatformInfo(**PLATFORM_INFO),
+        traveler=InvoiceTravelerInfo(
+            name=(traveler.display_name or traveler.username or "Traveler") if traveler else "Traveler",
+            email=traveler.email if traveler else "",
+            phone=traveler.phone if traveler else None,
+            city=traveler.location if traveler else "",
+        ),
+        agency=InvoiceAgencyInfo(
+            name=agency.name,
+            gstin=agency.gstin or "Pending verification",
+            pan=agency.pan or "",
+            address=", ".join([p for p in [agency.address, agency.city, agency.state] if p]),
+            email=agency.email or "",
+            phone=agency.phone or "",
+            logo_url=agency.logo_url,
+        ) if agency else None,
+        trip=InvoiceTripInfo(
+            title=trip_title,
+            destination=destination,
+            start_date=start_date,
+            end_date=end_date,
+            traveler_count=traveler_count,
+            price_per_person=int(offer.price_per_person * 100) if offer else per_person_rate,
+            inclusions=[],
+            cancellation_policy=(offer.cancellation_policy if offer else (package.cancellation_policy if package else "Standard policy")) or "Standard policy",
+            plan_type=plan.plan_type if plan else "STANDARD",
+            accommodation=(plan.accommodation if plan else package.accommodation if package else None),
+            vibes=[],
+        ),
+        line_items=[
+            InvoiceLineItem(
+                description=f"{trip_title} — {destination}",
+                subtext=f"{start_date or 'TBD'} → {end_date or 'TBD'}",
+                qty=traveler_count,
+                unit="person",
+                rate=per_person_rate,
+                subtotal=trip_amount,
+            ),
+            InvoiceLineItem(
+                description="TripSync Platform Fee (GST extra)",
+                subtext="Platform service fee",
+                qty=1,
+                unit="fixed",
+                rate=platform_fee_amount + fee_gst_amount,
+                subtotal=platform_fee_amount + fee_gst_amount,
+            ),
         ],
-        "summary": {
-            "subtotal": trip_amount + platform_fee_amount + fee_gst_amount,
-            "tripAmount": trip_amount,
-            "platformFee": platform_fee_amount,
-            "gstOnPlatformFee": fee_gst_amount,
-            "discountLines": discount_lines,
-            "totalDiscounts": -total_discounts,
-            "grandTotal": grand_total,
-        },
-        "payment": {
-            "id": payment.id,
-            "razorpayOrderId": payment.razorpay_order_id,
-            "razorpayPaymentId": payment.razorpay_payment_id,
-            "currency": payment.currency,
-            "paidAt": _iso(payment.paid_at),
-            "escrowSchedule": [
-                {
-                    "tranche": 1,
-                    "label": "Advance (45% to Agency)",
-                    "amount": int(round(agency_net * 0.45)),
-                    "released": bool(payment.tranche1_released),
-                },
-                {
-                    "tranche": 2,
-                    "label": "Final Settlement (55%)",
-                    "amount": int(round(agency_net * 0.55)),
-                    "released": bool(payment.tranche2_released),
-                },
-            ],
-        },
-        "pointsRedeemed": points_redeemed,
-        "walletAmountUsed": wallet_amount_used,
-        "refundPolicy": REFUND_POLICY,
-        "termsAndConditions": TERMS,
-        "members": member_names,
-    }
+        summary=InvoiceSummary(
+            subtotal=trip_amount + platform_fee_amount + fee_gst_amount,
+            trip_amount=trip_amount,
+            platform_fee=platform_fee_amount,
+            gst_on_platform_fee=fee_gst_amount,
+            discount_lines=discount_lines,
+            total_discounts=-total_discounts,
+            grand_total=grand_total,
+        ),
+        payment=UserPaymentInfo(
+            id=payment.id,
+            razorpay_order_id=payment.razorpay_order_id,
+            razorpay_payment_id=payment.razorpay_payment_id,
+            currency=payment.currency,
+            paid_at=_iso(payment.paid_at),
+        ),
+        points_redeemed=points_redeemed,
+        wallet_amount_used=wallet_amount_used,
+        refund_policy=REFUND_POLICY,
+        terms_and_conditions=TERMS,
+        members=member_names,
+    )
 
 
-async def build_agency_settlement_payload(db: AsyncSession, payment_id: str, requesting_user_id: str) -> dict:
+async def build_agency_settlement_payload(db: AsyncSession, payment_id: str, requesting_user_id: str) -> AgencySettlementResponse:
     payment = await _resolve_payment(db, payment_id)
     invoice = await _ensure_invoice(db, payment)
     ctx = await _trip_context(db, payment)
@@ -422,75 +422,74 @@ async def build_agency_settlement_payload(db: AsyncSession, payment_id: str, req
     agency_net = trip_amount - commission
     owner_user = await db.scalar(select(User).where(User.id == agency.owner_id)) if agency.owner_id else None
 
-    return {
-        "invoiceType": "AGENCY_SETTLEMENT",
-        "invoiceNumber": invoice.invoice_number.replace("TSU", "TSA"),
-        "issuedAt": _iso(payment.paid_at or invoice.created_at),
-        "status": payment.escrow_status,
-        "transferStatus": payment.transfer_status or "MANUAL",
-        "platform": {
-            "name": PLATFORM_INFO["name"],
-            "address": PLATFORM_INFO["address"],
-            "gstin": PLATFORM_INFO["gstin"],
-            "email": PLATFORM_INFO["email"],
-            "website": PLATFORM_INFO["website"],
-            "cin": PLATFORM_INFO["cin"],
-            "supportEmail": PLATFORM_INFO["supportEmail"],
-        },
-        "agency": {
-            "name": agency.name,
-            "gstin": agency.gstin or "Pending",
-            "pan": agency.pan or "",
-            "address": ", ".join([p for p in [agency.address, agency.city, agency.state] if p]),
-            "email": agency.email or "",
-            "phone": agency.phone or "",
-            "ownerName": (owner_user.display_name or owner_user.username or "") if owner_user else "",
-            "logoUrl": agency.logo_url,
-        },
-        "client": {
-            "name": (traveler.display_name or traveler.username or "Traveler") if traveler else "Traveler",
-            "email": traveler.email if traveler else "",
-            "phone": traveler.phone if traveler else None,
-        },
-        "trip": {
-            "title": trip_title,
-            "destination": destination,
-            "startDate": start_date,
-            "endDate": end_date,
-            "travelerCount": max(1, len(member_names)),
-        },
-        "settlement": {
-            "totalCollected": int(payment.amount),
-            "tripAmount": trip_amount,
-            "platformCommission": commission,
-            "platformFee": platform_fee,
-            "gstOnFee": gst_fee,
-            "agencyNetAmount": agency_net,
-            "schedule": [
-                {
-                    "tranche": 1,
-                    "label": "Advance Payout (45%)",
-                    "amount": int(round(agency_net * 0.45)),
-                    "released": bool(payment.tranche1_released),
-                    "expectedDate": _iso((payment.paid_at or payment.created_at) + timedelta(days=2)),
-                },
-                {
-                    "tranche": 2,
-                    "label": "Final Payout (55%)",
-                    "amount": int(round(agency_net * 0.55)),
-                    "released": bool(payment.tranche2_released),
-                    "expectedDate": end_date,
-                },
+    return AgencySettlementResponse(
+        invoice_number=invoice.invoice_number.replace("TSU", "TSA"),
+        issued_at=_iso(payment.paid_at or invoice.created_at),
+        status=payment.escrow_status,
+        transfer_status=payment.transfer_status or "MANUAL",
+        platform=PlatformInfo(
+            name=PLATFORM_INFO["name"],
+            address=PLATFORM_INFO["address"],
+            gstin=PLATFORM_INFO["gstin"],
+            email=PLATFORM_INFO["email"],
+            website=PLATFORM_INFO["website"],
+            cin=PLATFORM_INFO["cin"],
+            support_email=PLATFORM_INFO["supportEmail"],
+        ),
+        agency=InvoiceAgencyInfo(
+            name=agency.name,
+            gstin=agency.gstin or "Pending",
+            pan=agency.pan or "",
+            address=", ".join([p for p in [agency.address, agency.city, agency.state] if p]),
+            email=agency.email or "",
+            phone=agency.phone or "",
+            owner_name=(owner_user.display_name or owner_user.username or "") if owner_user else "",
+            logo_url=agency.logo_url,
+        ),
+        client=InvoiceClientInfo(
+            name=(traveler.display_name or traveler.username or "Traveler") if traveler else "Traveler",
+            email=traveler.email if traveler else "",
+            phone=traveler.phone if traveler else None,
+        ),
+        trip=SettlementTripInfo(
+            title=trip_title,
+            destination=destination,
+            start_date=start_date,
+            end_date=end_date,
+            traveler_count=max(1, len(member_names)),
+        ),
+        settlement=SettlementInfo(
+            total_collected=int(payment.amount),
+            trip_amount=trip_amount,
+            platform_commission=commission,
+            platform_fee=platform_fee,
+            gst_on_fee=gst_fee,
+            agency_net_amount=agency_net,
+            schedule=[
+                PayoutScheduleItem(
+                    tranche=1,
+                    label="Advance Payout (45%)",
+                    amount=int(round(agency_net * 0.45)),
+                    released=bool(payment.tranche1_released),
+                    expected_date=_iso((payment.paid_at or payment.created_at) + timedelta(days=2)),
+                ),
+                PayoutScheduleItem(
+                    tranche=2,
+                    label="Final Payout (55%)",
+                    amount=int(round(agency_net * 0.55)),
+                    released=bool(payment.tranche2_released),
+                    expected_date=end_date,
+                ),
             ],
-        },
-        "payment": {
-            "id": payment.id,
-            "razorpayOrderId": payment.razorpay_order_id,
-            "razorpayPaymentId": payment.razorpay_payment_id,
-            "currency": payment.currency,
-            "paidAt": _iso(payment.paid_at),
-            "transferReference": None,
-        },
-        "members": member_names,
-        "termsAndConditions": TERMS,
-    }
+        ),
+        payment=SettlementPaymentInfo(
+            id=payment.id,
+            razorpay_order_id=payment.razorpay_order_id,
+            razorpay_payment_id=payment.razorpay_payment_id,
+            currency=payment.currency,
+            paid_at=_iso(payment.paid_at),
+            transfer_reference=None,
+        ),
+        members=member_names,
+        terms_and_conditions=TERMS,
+    )

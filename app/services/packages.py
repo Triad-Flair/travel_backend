@@ -9,11 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
 from app.core.cache import CacheKeys, TTL_LONG, get_cached, invalidate, invalidate_pattern, set_cached
-from app.exceptions import ForbiddenError, NotFoundError
+from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.agency import Agency
+from app.models.group import Group, GroupMember
 from app.models.package import Package
-from app.schemas.common import AgencyCard, AgencySummary
+from app.schemas.common import AgencyCard, AgencyPublicSummary
+from app.schemas.groups import GroupSummaryResponse
 from app.schemas.packages import CreatePackageRequest, PackageCardResponse, PackageDetails, PackageMeta, UpdatePackageRequest
+from app.schemas.plans import GroupSummary
 
 
 def _calc_duration(start: datetime | None, end: datetime | None) -> int | None:
@@ -56,16 +59,16 @@ def _pkg_to_card(pkg: Package) -> PackageCardResponse:
     )
 
 
-def _agency_to_summary(agency: Agency) -> AgencySummary:
-    return AgencySummary(
+def _agency_to_summary(agency: Agency) -> AgencyPublicSummary:
+    """Package detail/card endpoints are public and unauthenticated — never
+    include GST/PAN here. See AgencyPublicSummary docstring."""
+    return AgencyPublicSummary(
         id=agency.id,
         name=agency.name,
         slug=agency.slug,
         logo_url=agency.logo_url,
         description=agency.description,
         verification=agency.verification_status,
-        gstin=agency.gstin,
-        pan=agency.pan,
         phone=agency.phone,
         email=agency.email,
         city=agency.city,
@@ -76,7 +79,19 @@ def _agency_to_summary(agency: Agency) -> AgencySummary:
     )
 
 
-def _pkg_to_details(pkg: Package) -> PackageDetails:
+def _group_to_summary(group: Group) -> GroupSummary:
+    return GroupSummary(
+        id=group.id,
+        current_size=group.current_size or 0,
+        male_count=group.male_count or 0,
+        female_count=group.female_count or 0,
+        other_count=group.other_count or 0,
+        is_locked=bool(group.is_locked),
+        payment_window_ends_at=group.payment_window_closes_at.isoformat() if group.payment_window_closes_at else None,
+    )
+
+
+def _pkg_to_details(pkg: Package, group: Group | None = None) -> PackageDetails:
     gallery = _parse_json_list(pkg.gallery_urls)
     return PackageDetails(
         id=pkg.id,
@@ -102,6 +117,7 @@ def _pkg_to_details(pkg: Package) -> PackageDetails:
         itinerary=_parse_json(pkg.itinerary),
         status=pkg.status,
         agency=_agency_to_summary(pkg.agency),
+        group=_group_to_summary(group) if group else None,
         created_at=pkg.created_at.isoformat(),
         updated_at=pkg.updated_at.isoformat(),
     )
@@ -170,7 +186,8 @@ async def get_package_by_slug(db: AsyncSession, slug: str) -> PackageDetails:
     if not pkg:
         raise NotFoundError("Package")
 
-    details = _pkg_to_details(pkg)
+    group = await db.scalar(select(Group).where(Group.package_id == pkg.id))
+    details = _pkg_to_details(pkg, group)
     await set_cached(cache_key, details.model_dump(by_alias=True), TTL_LONG)
     return details
 
@@ -184,7 +201,8 @@ async def get_package_by_id(db: AsyncSession, pkg_id: str) -> PackageDetails:
     pkg = result.scalar_one_or_none()
     if not pkg:
         raise NotFoundError("Package")
-    return _pkg_to_details(pkg)
+    group = await db.scalar(select(Group).where(Group.package_id == pkg.id))
+    return _pkg_to_details(pkg, group)
 
 
 async def list_my_packages(
@@ -291,6 +309,75 @@ async def publish_package(db: AsyncSession, pkg_id: str, agency_id: str) -> Pack
     await invalidate(CacheKeys.package_detail(pkg.slug))
     await invalidate_pattern("discover:*")
     return _pkg_to_details(pkg)
+
+
+def _group_to_summary_response(group: Group) -> GroupSummaryResponse:
+    return GroupSummaryResponse(
+        id=group.id,
+        plan_id=group.plan_id,
+        package_id=group.package_id,
+        current_size=group.current_size or 0,
+        male_count=group.male_count or 0,
+        female_count=group.female_count or 0,
+        other_count=group.other_count or 0,
+        is_locked=bool(group.is_locked),
+        payment_window_ends_at=group.payment_window_closes_at.isoformat() if group.payment_window_closes_at else None,
+    )
+
+
+async def book_package(db: AsyncSession, pkg_id: str, user_id: str) -> GroupSummaryResponse:
+    """Creates (or joins) the Group for a catalog package — the missing link
+    that made packages unbookable: nothing else in the codebase creates a
+    Group for a Package. One Group per package at a time, matching how
+    services/payments.py::_finalize_capture transitions package.status based
+    on a single group's captured-payment count; later bookers of the same
+    package join the existing group instead of starting a competing one."""
+    pkg = await db.scalar(select(Package).where(Package.id == pkg_id))
+    if not pkg:
+        raise NotFoundError("Package")
+    if pkg.status != "OPEN":
+        raise BadRequestError("This package is not currently open for booking")
+
+    group = await db.scalar(select(Group).where(Group.package_id == pkg_id))
+    if not group:
+        group = Group(id=str(uuid.uuid4()), package_id=pkg_id, current_size=0)
+        db.add(group)
+        await db.flush()
+
+    if group.is_locked:
+        raise BadRequestError("This group is locked and no longer accepting new members")
+
+    member = await db.scalar(
+        select(GroupMember).where(GroupMember.group_id == group.id, GroupMember.user_id == user_id)
+    )
+    if member and member.status in ("APPROVED", "COMMITTED", "INTERESTED"):
+        return _group_to_summary_response(group)
+
+    if member:
+        member.status = "APPROVED"
+        member.joined_at = datetime.utcnow()
+        member.left_at = None
+    else:
+        db.add(
+            GroupMember(
+                id=str(uuid.uuid4()),
+                group_id=group.id,
+                user_id=user_id,
+                role="CREATOR" if (group.current_size or 0) == 0 else "MEMBER",
+                status="APPROVED",
+                joined_at=datetime.utcnow(),
+            )
+        )
+
+    group.current_size = (group.current_size or 0) + 1
+    await db.flush()
+    await invalidate(CacheKeys.package_detail(pkg.slug))
+
+    # PRD trigger: send_group_chat_verification_email
+    from app.workers.tasks import send_group_chat_verification_email_task
+    send_group_chat_verification_email_task.delay(user_id, group.id)
+
+    return _group_to_summary_response(group)
 
 
 def _to_model_field(schema_field: str) -> str:

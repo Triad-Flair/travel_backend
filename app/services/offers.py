@@ -2,14 +2,19 @@ import json
 import uuid
 from datetime import datetime
 
+from slugify import slugify
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.agency import Agency, AgencyMember
+from app.models.group import Group, GroupMember
 from app.models.offer import Offer, OfferNegotiation
+from app.models.package import Package
 from app.models.plan import Plan
 from app.models.user import User
+
+OPEN_OFFER_STATUSES = ("PENDING", "COUNTERED")
 from app.schemas.common import AgencySummary, UserSummary
 from app.schemas.offers import (
     CounterOfferRequest,
@@ -233,6 +238,12 @@ async def submit_offer(
         )
         await db.flush()
 
+    # PRD trigger: send_bid_alert_email — notify the plan creator a new
+    # offer has arrived. Previously unwired (send_offer_notification_email
+    # existed in app/lib/email.py but nothing called it).
+    from app.workers.tasks import send_bid_alert_email_task
+    send_bid_alert_email_task.delay(offer.id)
+
     return await _offer_to_response(db, offer)
 
 
@@ -255,6 +266,9 @@ async def counter_offer(
     if not is_plan_creator and not is_offer_agency:
         raise ForbiddenError("You are not allowed to counter this offer")
 
+    if offer.status not in OPEN_OFFER_STATUSES:
+        raise BadRequestError(f"This offer is {offer.status.lower()} and can no longer be countered")
+
     neg_count = await db.scalar(
         select(func.count(OfferNegotiation.id)).where(OfferNegotiation.offer_id == offer.id)
     ) or 0
@@ -274,6 +288,11 @@ async def counter_offer(
     offer.price_per_person = req.price
     offer.status = "COUNTERED"
     await db.flush()
+    # offer.updated_at has onupdate=func.now() — SQLAlchemy marks it expired
+    # after this UPDATE rather than eagerly re-fetching it, and a bare
+    # synchronous re-read of an expired attribute crashes under the asyncio
+    # extension (MissingGreenlet). An explicit awaited refresh avoids that.
+    await db.refresh(offer)
 
     return await _offer_to_response(db, offer)
 
@@ -287,11 +306,72 @@ async def accept_offer(db: AsyncSession, offer_id: str, user_id: str) -> OfferRe
     if not plan or plan.creator_id != user_id:
         raise ForbiddenError("Only plan creator can accept")
 
+    if offer.status not in OPEN_OFFER_STATUSES:
+        raise BadRequestError(f"This offer is {offer.status.lower()} and can no longer be accepted")
+
     offer.status = "ACCEPTED"
     plan.confirmed_offer_id = offer.id
     plan.status = "CONFIRMED"
     plan.confirmed_at = datetime.utcnow()
+
+    # Generate the bookable Package + Group at the agreed terms — this is the
+    # only place a Plan-based booking becomes payable; nothing else in the
+    # codebase creates a Group for a Plan. IDs are set here (not left to the
+    # DB) so all three rows can be added and flushed together in one round
+    # trip, rather than a flush per object.
+    package = Package(
+        id=str(uuid.uuid4()),
+        agency_id=offer.agency_id,
+        title=plan.title,
+        slug=slugify(plan.title) + "-" + str(uuid.uuid4())[:8],
+        destination=plan.destination,
+        destination_state=plan.destination_state,
+        start_date=plan.start_date,
+        end_date=plan.end_date,
+        price_per_person=offer.price_per_person,
+        pricing_tiers=offer.pricing_tiers,
+        group_size_min=plan.group_size_min,
+        group_size_max=plan.group_size_max,
+        inclusions=offer.inclusions,
+        accommodation=plan.accommodation,
+        vibes=plan.vibes,
+        activities=plan.activities,
+        cancellation_policy=offer.cancellation_policy,
+        cancellation_rules=offer.cancellation_rules,
+        itinerary=offer.itinerary,
+        status="CONFIRMING",
+        source_offer_id=offer.id,
+    )
+    db.add(package)
+
+    group = Group(
+        id=str(uuid.uuid4()),
+        plan_id=plan.id,
+        package_id=package.id,
+        current_size=1,
+    )
+    db.add(group)
+
+    # The plan creator is confirmed into the group (eligible to pay) but not
+    # yet "COMMITTED" — that status is reserved for members with a captured
+    # payment (see _finalize_capture in services/payments.py).
+    db.add(
+        GroupMember(
+            id=str(uuid.uuid4()),
+            group_id=group.id,
+            user_id=user_id,
+            role="CREATOR",
+            status="APPROVED",
+            joined_at=datetime.utcnow(),
+        )
+    )
     await db.flush()
+    await db.refresh(offer)  # see comment in counter_offer re: expired onupdate column
+
+    # PRD trigger: send_group_chat_verification_email
+    from app.workers.tasks import send_group_chat_verification_email_task
+    send_group_chat_verification_email_task.delay(user_id, group.id)
+
     return await _offer_to_response(db, offer)
 
 
@@ -309,8 +389,12 @@ async def reject_offer(
     if not plan or plan.creator_id != user_id:
         raise ForbiddenError("Only plan creator can reject")
 
+    if offer.status not in OPEN_OFFER_STATUSES:
+        raise BadRequestError(f"This offer is {offer.status.lower()} and can no longer be rejected")
+
     offer.status = "REJECTED"
     await db.flush()
+    await db.refresh(offer)  # see comment in counter_offer re: expired onupdate column
     return await _offer_to_response(db, offer)
 
 
@@ -321,8 +405,12 @@ async def withdraw_offer(db: AsyncSession, offer_id: str, agency_id: str) -> Off
     if offer.agency_id != agency_id:
         raise ForbiddenError("Only the agency can withdraw this offer")
 
+    if offer.status not in OPEN_OFFER_STATUSES:
+        raise BadRequestError(f"This offer is {offer.status.lower()} and can no longer be withdrawn")
+
     offer.status = "WITHDRAWN"
     await db.flush()
+    await db.refresh(offer)  # see comment in counter_offer re: expired onupdate column
     return await _offer_to_response(db, offer)
 
 

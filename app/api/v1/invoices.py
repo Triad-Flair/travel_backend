@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user
+from app.schemas.invoices import AgencySettlementResponse, UserInvoiceResponse
 from app.services import invoices as inv_svc
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
@@ -25,7 +26,7 @@ async def list_agency_invoices(
     return await inv_svc.list_agency_invoices(db, agency_id)
 
 
-@router.get("/agency/settlement/{payment_id}")
+@router.get("/agency/settlement/{payment_id}", response_model=AgencySettlementResponse)
 async def agency_settlement_detail(
     payment_id: str,
     current_user: CurrentUser = Depends(get_current_user),
@@ -34,7 +35,7 @@ async def agency_settlement_detail(
     return await inv_svc.build_agency_settlement_payload(db, payment_id, current_user.user_id)
 
 
-@router.get("/{payment_id}")
+@router.get("/{payment_id}", response_model=UserInvoiceResponse)
 async def user_invoice_detail(
     payment_id: str,
     current_user: CurrentUser = Depends(get_current_user),

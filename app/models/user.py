@@ -37,7 +37,8 @@ class User(TimestampsMixin, BaseModel):
     referral_code: Mapped[str | None] = mapped_column("referralCode", String(20), nullable=True)
     email_verified: Mapped[bool] = mapped_column("emailVerified", Boolean, default=False, nullable=False)
     email_verification_token: Mapped[str | None] = mapped_column("emailVerificationToken", String(255), nullable=True)
-    # role is not in the DB — derived from agency membership (agency admin = has AgencyMember row)
+    is_platform_admin: Mapped[bool] = mapped_column("isPlatformAdmin", Boolean, default=False, nullable=False)
+    # role is not in the DB — derived from is_platform_admin / agency membership at login time
     role: str = "user"  # non-mapped, set at runtime
 
     plans = relationship("Plan", back_populates="creator", lazy="noload", foreign_keys="Plan.creator_id")

@@ -101,7 +101,7 @@ async def confirm_with_offer(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await plan_svc.get_plan_by_id(db, plan_id)
+    return await plan_svc.confirm_plan_with_offer(db, plan_id, current_user.user_id, req.offer_id)
 
 
 @router.get("/{plan_id}/offers")
