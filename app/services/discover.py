@@ -156,6 +156,8 @@ async def get_discover_feed(
 
     if filters.origin_type in (None, "plan"):
         q = select(Plan).where(Plan.status == 'OPEN')
+        if filters.plan_type:
+            q = q.where(Plan.plan_type == filters.plan_type)
         if filters.destination:
             q = q.where(Plan.destination.ilike(f"%{filters.destination}%"))
         if filters.budget_min:

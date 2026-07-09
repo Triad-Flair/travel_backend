@@ -58,6 +58,31 @@ async def test_discover_feed_does_query_packages_for_a_public_requester():
 
 
 @pytest.mark.asyncio
+async def test_discover_feed_applies_plan_type_filter():
+    """planType was accepted into DiscoverFilters and threaded through the
+    API/service signature but never actually applied to the query — the
+    'User Plans' vs 'Corporate Plans' tabs an agency sees on Discover
+    returned identical, unfiltered results. Confirms the WHERE clause now
+    includes planType when the filter is set."""
+    from app.schemas.discover import DiscoverFilters
+    from app.services.discover import get_discover_feed
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_empty_result())
+
+    with patch("app.services.discover.get_cached", new=AsyncMock(return_value=None)), \
+         patch("app.services.discover.set_cached", new=AsyncMock()):
+        await get_discover_feed(
+            db, DiscoverFilters(page=1, page_size=20, plan_type="CORPORATE"), requesting_agency_id="agency-1"
+        )
+
+    executed_sql = [str(call.args[0]) for call in db.execute.call_args_list]
+    assert any('"planType"' in sql for sql in executed_sql), (
+        "plan_type filter was set on DiscoverFilters but never reached the WHERE clause"
+    )
+
+
+@pytest.mark.asyncio
 async def test_trending_returns_empty_for_agency_without_querying_db():
     from app.services.discover import get_trending
 
