@@ -1,7 +1,8 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote, unquote
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,12 +55,14 @@ class Settings(BaseSettings):
     zeptomail_api_key: str = ""
     zeptomail_from_address: str = "noreply@travellersindia.com"
     zeptomail_from_name: str = "Travellers India"
-    smtp_host: str = "smtp.zoho.com"
-    smtp_port: int = 465
-    smtp_secure: bool = True
-    smtp_user: str = ""
-    smtp_password: str = ""
+    smtp_host: str = Field(default="smtp.zoho.com", validation_alias=AliasChoices("SMTP_HOST", "ZOHO_SMTP_HOST"))
+    smtp_port: int = Field(default=465, validation_alias=AliasChoices("SMTP_PORT", "ZOHO_SMTP_PORT"))
+    smtp_secure: bool = Field(default=True, validation_alias=AliasChoices("SMTP_SECURE", "ZOHO_SMTP_SECURE"))
+    smtp_user: str = Field(default="", validation_alias=AliasChoices("SMTP_USER", "ZOHO_EMAIL"))
+    smtp_password: str = Field(default="", validation_alias=AliasChoices("SMTP_PASSWORD", "ZOHO_EMAIL_PASSWORD"))
     smtp_test_secret: str = ""
+    email_verification_expire_hours: int = 24
+    password_reset_expire_minutes: int = 30
 
     # WhatsApp
     msg91_auth_key: str = ""
@@ -113,6 +116,29 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+
+    @property
+    def async_database_url(self) -> str:
+        raw = self.database_url.strip().strip('"').strip("'")
+        if "://" not in raw:
+            return raw
+
+        scheme, remainder = raw.split("://", 1)
+        if scheme == "postgresql":
+            scheme = "postgresql+asyncpg"
+
+        if "@" not in remainder:
+            return f"{scheme}://{remainder}"
+
+        credentials, host_and_path = remainder.rsplit("@", 1)
+        if ":" not in credentials:
+            safe_user = quote(unquote(credentials), safe="")
+            return f"{scheme}://{safe_user}@{host_and_path}"
+
+        user, password = credentials.split(":", 1)
+        safe_user = quote(unquote(user), safe="")
+        safe_password = quote(unquote(password), safe="")
+        return f"{scheme}://{safe_user}:{safe_password}@{host_and_path}"
 
     @property
     def is_production(self) -> bool:

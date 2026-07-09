@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,7 +49,12 @@ class AgencyMember(BaseModel):
 
     agency_id: Mapped[str] = mapped_column("agencyId", String(36), ForeignKey("agencies.id"), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column("userId", String(36), ForeignKey("users.id"), nullable=False, index=True)
-    role: Mapped[str] = mapped_column("role", String(20), default="AGENT", nullable=False)
+    role: Mapped[str] = mapped_column(
+        "role",
+        PgEnum("ADMIN", "MANAGER", "AGENT", "FINANCE", name="AgencyMemberRole", create_type=False),
+        default="AGENT",
+        nullable=False,
+    )
     is_active: Mapped[bool] = mapped_column("isActive", Boolean, default=True, nullable=False)
     invited_by: Mapped[str | None] = mapped_column("invitedBy", String(36), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(
@@ -73,7 +79,20 @@ class AgencyWallet(BaseModel):
     total_earned: Mapped[int] = mapped_column("totalEarned", Integer, default=0, nullable=False)
     total_commission: Mapped[int] = mapped_column("totalCommission", Integer, default=0, nullable=False)
     security_deposit: Mapped[int] = mapped_column("securityDeposit", Integer, default=0, nullable=False)
-    payout_mode: Mapped[str] = mapped_column("payoutMode", String(20), default="TRUST", nullable=False)
+    payout_mode: Mapped[str] = mapped_column(
+        "payoutMode",
+        PgEnum("TRUST", "PRO", name="WalletPayoutMode", create_type=False),
+        default="TRUST",
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt",
+        DateTime(timezone=True),
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
     agency = relationship("Agency", lazy="noload")
 

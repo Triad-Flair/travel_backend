@@ -6,6 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.exceptions import BadRequestError, ForbiddenError, NotFoundError, PaymentError
+from app.lib.email import (
+    send_agency_booking_invoice_email,
+    send_agency_payout_update_email,
+    send_payment_receipt_email,
+)
 from app.lib.razorpay_client import create_order, verify_signature
 from app.models.agency import Agency, AgencyTransaction, AgencyWallet
 from app.models.group import Group, GroupMember
@@ -14,6 +19,7 @@ from app.models.offer import Offer
 from app.models.package import Package
 from app.models.payment import Dispute, Payment
 from app.models.plan import Plan
+from app.models.user import User
 from app.schemas.payments import (
     AgencyWalletSummary,
     AgencyWalletTransaction,
@@ -28,6 +34,7 @@ from app.schemas.payments import (
     ValidatePromoResponse,
     VerifyPaymentRequest,
 )
+from app.services import invoices as inv_svc
 
 PLATFORM_FEE_PAISE = 299 * 100
 FEE_GST_RATE = 0.18
@@ -79,6 +86,68 @@ def _payment_to_response(payment: Payment) -> PaymentRecordResponse:
         commission_amount=int(payment.commission_amount or 0),
         created_at=payment.created_at.isoformat(),
         updated_at=payment.updated_at.isoformat(),
+    )
+
+
+async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> None:
+    invoice = await inv_svc._ensure_invoice(db, payment)
+    ctx = await inv_svc._trip_context(db, payment)
+    trip = ctx["plan"] or ctx["package"]
+    agency = ctx["agency"]
+
+    traveler = await db.scalar(select(User).where(User.id == payment.user_id))
+    if traveler and traveler.email and trip:
+        await send_payment_receipt_email(
+            traveler.email,
+            traveler.display_name or traveler.username or "Traveler",
+            invoice.invoice_number,
+            trip.title,
+            f"{settings.frontend_url}/dashboard/invoices/{payment.id}",
+            int(payment.amount or 0),
+        )
+
+    if agency and agency.owner_id and trip:
+        owner = await db.scalar(select(User).where(User.id == agency.owner_id))
+        if owner and owner.email:
+            await send_agency_booking_invoice_email(
+                owner.email,
+                owner.display_name or owner.username or agency.name,
+                agency.name,
+                invoice.invoice_number.replace("TSU", "TSA"),
+                trip.title,
+                f"{settings.frontend_url}/agency/invoices/{payment.id}",
+                int(payment.amount or 0),
+            )
+
+
+async def _send_payout_notification(db: AsyncSession, payment: Payment, tranche: str) -> None:
+    invoice = await inv_svc._ensure_invoice(db, payment)
+    ctx = await inv_svc._trip_context(db, payment)
+    agency = ctx["agency"]
+    if not agency or not agency.owner_id:
+        return
+
+    owner = await db.scalar(select(User).where(User.id == agency.owner_id))
+    if not owner or not owner.email:
+        return
+
+    agency_net = int((payment.trip_amount or 0) - (payment.commission_amount or 0))
+    if tranche == "tranche2":
+        tranche_label = "Final settlement"
+        released_amount = int(round(agency_net * 0.55))
+    else:
+        tranche_label = "Advance payout"
+        released_amount = int(round(agency_net * 0.45))
+
+    await send_agency_payout_update_email(
+        owner.email,
+        owner.display_name or owner.username or agency.name,
+        agency.name,
+        invoice.invoice_number.replace("TSU", "TSA"),
+        tranche_label,
+        payment.escrow_status,
+        f"{settings.frontend_url}/agency/invoices/{payment.id}",
+        released_amount,
     )
 
 
@@ -243,6 +312,10 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
                 package.status = "CONFIRMED"
             elif package.status == "OPEN":
                 package.status = "CONFIRMING"
+
+    await inv_svc._ensure_invoice(db, payment)
+    await db.flush()
+    await _send_capture_notifications(db, payment)
 
 
 async def list_my_payments(
@@ -706,6 +779,7 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
     if not payment:
         raise NotFoundError("Payment")
 
+    already_released = bool(payment.tranche2_released) if tranche == "tranche2" else bool(payment.tranche1_released)
     if tranche == "tranche2":
         payment.tranche2_released = True
     else:
@@ -713,10 +787,14 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
 
     if payment.tranche1_released and payment.tranche2_released:
         payment.escrow_status = "RELEASED"
+        payment.transfer_status = "SETTLED"
     else:
         payment.escrow_status = "PARTIAL_RELEASE"
+        payment.transfer_status = "PROCESSING"
 
     await db.flush()
+    if not already_released:
+        await _send_payout_notification(db, payment, tranche)
     return {
         "paymentId": payment.id,
         "tranche": tranche,
@@ -772,9 +850,16 @@ async def complete_trip(db: AsyncSession, group_id: str) -> dict:
             package.status = "COMPLETED"
 
     rows = await db.execute(select(Payment).where(Payment.group_id == group_id))
-    for payment in rows.scalars().all():
+    payments = rows.scalars().all()
+    tranche2_released_now: list[Payment] = []
+    for payment in payments:
         payment.escrow_status = "RELEASED"
+        payment.transfer_status = "SETTLED"
+        if not payment.tranche2_released:
+            tranche2_released_now.append(payment)
         payment.tranche2_released = True
 
     await db.flush()
+    for payment in tranche2_released_now:
+        await _send_payout_notification(db, payment, "tranche2")
     return {"groupId": group_id, "status": "COMPLETED"}

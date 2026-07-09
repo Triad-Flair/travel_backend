@@ -24,6 +24,10 @@ class CreatedAtMixin:
 class TimestampsMixin(CreatedAtMixin):
     """For tables that have BOTH createdAt and updatedAt."""
     updated_at: Mapped[datetime] = mapped_column(
-        "updatedAt", DateTime(timezone=True), server_default=func.now(),
-        onupdate=func.now(), nullable=True
+        "updatedAt",
+        DateTime(timezone=True),
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )

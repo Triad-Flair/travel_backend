@@ -71,10 +71,6 @@ async def _resolve_payment(db: AsyncSession, identifier: str) -> Payment:
 
 
 async def _ensure_invoice(db: AsyncSession, payment: Payment) -> Invoice:
-    invoice = await db.scalar(select(Invoice).where(Invoice.payment_id == payment.id))
-    if invoice:
-        return invoice
-
     agency_id = payment.agency_id
     if not agency_id:
         group = await db.scalar(select(Group).where(Group.id == payment.group_id))
@@ -88,6 +84,21 @@ async def _ensure_invoice(db: AsyncSession, payment: Payment) -> Invoice:
             package = await db.scalar(select(Package).where(Package.id == group.package_id))
             if package:
                 agency_id = package.agency_id
+
+    invoice = await db.scalar(select(Invoice).where(Invoice.payment_id == payment.id))
+    if invoice:
+        invoice.group_id = payment.group_id
+        invoice.agency_id = agency_id or invoice.agency_id
+        invoice.user_id = payment.user_id
+        invoice.amount = int(payment.trip_amount or payment.amount)
+        invoice.platform_fee_amount = int(payment.platform_fee_amount or 0)
+        invoice.fee_gst_amount = int(payment.fee_gst_amount or 0)
+        invoice.commission_amount = int(payment.commission_amount or 0)
+        invoice.total_amount = int(payment.amount)
+        invoice.currency = payment.currency
+        invoice.status = payment.status
+        await db.flush()
+        return invoice
 
     invoice = Invoice(
         id=str(uuid.uuid4()),

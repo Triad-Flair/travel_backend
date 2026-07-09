@@ -11,10 +11,13 @@ from app.schemas.auth import (
     AadhaarVerificationRequest,
     AadhaarVerificationResponse,
     AgencySignupRequest,
+    AuthActionResponse,
     AuthSessionResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     RefreshRequest,
     ResendVerificationRequest,
+    ResetPasswordRequest,
     SignupMessageResponse,
     TravelerSignupRequest,
     UpdateProfileRequest,
@@ -112,9 +115,19 @@ async def verify_email(
     return await auth_svc.verify_email(db, token_to_verify)
 
 
-@router.post("/resend-verification")
+@router.post("/resend-verification", response_model=AuthActionResponse)
 async def resend_verification(req: ResendVerificationRequest, db: AsyncSession = Depends(get_db)):
-    return {"sent": True, "message": "Verification email sent"}
+    return await auth_svc.resend_verification(db, req)
+
+
+@router.post("/forgot-password", response_model=AuthActionResponse)
+async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    return await auth_svc.request_password_reset(db, req)
+
+
+@router.post("/reset-password", response_model=SignupMessageResponse)
+async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    return await auth_svc.reset_password(db, req)
 
 
 @router.get("/smtp-test")

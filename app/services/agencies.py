@@ -195,7 +195,7 @@ async def create_agency(db: AsyncSession, owner_id: str, req: CreateAgencyReques
     )
     db.add(agency)
     await db.flush()
-    db.add(AgencyMember(id=str(uuid.uuid4()), agency_id=agency.id, user_id=owner_id, role="OWNER"))
+    db.add(AgencyMember(id=str(uuid.uuid4()), agency_id=agency.id, user_id=owner_id, role="ADMIN"))
     db.add(AgencyWallet(id=str(uuid.uuid4()), agency_id=agency.id))
     await db.flush()
     return _to_profile(agency)

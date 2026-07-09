@@ -56,6 +56,15 @@ class RefreshRequest(CamelModel):
     refresh_token: str
 
 
+class ForgotPasswordRequest(CamelModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(CamelModel):
+    token: str = Field(..., min_length=20)
+    password: str = Field(..., min_length=8)
+
+
 # ── Response schemas ──────────────────────────────────────────────────────────
 
 class AgencySummaryInSession(CamelModel):
@@ -97,6 +106,11 @@ class AuthSessionResponse(CamelModel):
 
 class SignupMessageResponse(CamelModel):
     message: str
+
+
+class AuthActionResponse(CamelModel):
+    message: str
+    sent: bool = True
 
 
 class UpdateProfileRequest(CamelModel):

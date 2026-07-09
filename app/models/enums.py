@@ -79,9 +79,10 @@ class TransferStatus(str, enum.Enum):
 
 
 class AgencyMemberRole(str, enum.Enum):
-    OWNER = "OWNER"
     ADMIN = "ADMIN"
+    MANAGER = "MANAGER"
     AGENT = "AGENT"
+    FINANCE = "FINANCE"
 
 
 class AgencyVerificationStatus(str, enum.Enum):

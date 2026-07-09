@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.router import v1_router
 from app.config import settings
@@ -89,6 +90,40 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"errors": errors},
+        )
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error_handler(request: Request, exc: IntegrityError):
+        logger.warning("Integrity error %s %s: %s", request.method, request.url, exc)
+        detail = str(getattr(exc, "orig", exc)).lower()
+
+        if "duplicate key value violates unique constraint" in detail or "unique constraint failed" in detail:
+            if "phone" in detail:
+                message = "Phone already registered"
+            elif "email" in detail:
+                message = "Email already registered"
+            elif "username" in detail:
+                message = "Username already taken"
+            elif "gstin" in detail:
+                message = "GSTIN is already registered"
+            else:
+                message = "A record with the same unique value already exists"
+
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"errors": [{"code": "CONFLICT", "message": message}]},
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "errors": [
+                    {
+                        "code": "DB_CONSTRAINT_ERROR",
+                        "message": "The request could not be saved because it violates a database constraint.",
+                    }
+                ]
+            },
         )
 
     @app.exception_handler(Exception)

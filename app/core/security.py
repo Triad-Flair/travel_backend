@@ -61,6 +61,16 @@ def create_refresh_token(payload: dict) -> str:
     return jwt.encode(data, settings.jwt_refresh_secret, algorithm=settings.jwt_algorithm)
 
 
+def create_action_token(payload: dict, *, purpose: str, expires_in: timedelta) -> str:
+    data = payload.copy()
+    now = datetime.now(UTC)
+    data["exp"] = now + expires_in
+    data["iat"] = now
+    data["type"] = "action"
+    data["purpose"] = purpose
+    return jwt.encode(data, settings.jwt_access_secret, algorithm=settings.jwt_algorithm)
+
+
 def decode_access_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, settings.jwt_access_secret, algorithms=[settings.jwt_algorithm])
@@ -77,6 +87,20 @@ def decode_refresh_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, settings.jwt_refresh_secret, algorithms=[settings.jwt_algorithm])
         if payload.get("type") != "refresh":
+            raise InvalidTokenError()
+        return payload
+    except JWTError as exc:
+        if "expired" in str(exc):
+            raise TokenExpiredError()
+        raise InvalidTokenError()
+
+
+def decode_action_token(token: str, *, expected_purpose: str | None = None) -> dict:
+    try:
+        payload = jwt.decode(token, settings.jwt_access_secret, algorithms=[settings.jwt_algorithm])
+        if payload.get("type") != "action":
+            raise InvalidTokenError()
+        if expected_purpose and payload.get("purpose") != expected_purpose:
             raise InvalidTokenError()
         return payload
     except JWTError as exc:
