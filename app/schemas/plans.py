@@ -46,6 +46,14 @@ class OfferInPlan(CamelModel):
     negotiations: list[Negotiation] = []
 
 
+class GroupMemberSummary(CamelModel):
+    id: str
+    role: str
+    status: str
+    joined_at: str | None = None
+    user: UserSummary
+
+
 class GroupSummary(CamelModel):
     id: str
     current_size: int
@@ -54,6 +62,7 @@ class GroupSummary(CamelModel):
     other_count: int = 0
     is_locked: bool
     payment_window_ends_at: str | None = None
+    members: list[GroupMemberSummary] | None = None
 
 
 # Matches frontend PlanDetails exactly

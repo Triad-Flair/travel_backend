@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.cache import CacheKeys, TTL_MEDIUM, TTL_SHORT, get_cached, set_cached
 from app.models.enums import PackageStatus, PlanStatus
@@ -48,6 +49,7 @@ def _json_list(raw: object) -> list[str] | None:
 def _plan_to_discover(plan: Plan, joined_count: int = 0) -> DiscoverItem:
     gallery = _json_list(plan.gallery_urls) or []
     cover_image = plan.cover_image_url or (gallery[0] if gallery else None)
+    creator = getattr(plan, "creator", None)
     return DiscoverItem(
         id=plan.id,
         slug=plan.slug,
@@ -69,12 +71,15 @@ def _plan_to_discover(plan: Plan, joined_count: int = 0) -> DiscoverItem:
         owner_id=plan.creator_id,
         agency_id=None,
         joined_count=joined_count,
+        rating=creator.avg_rating if creator and creator.avg_rating else None,
+        rating_count=creator.completed_trips if creator else None,
     )
 
 
 def _pkg_to_discover(pkg: Package, joined_count: int = 0) -> DiscoverItem:
     gallery = _json_list(pkg.gallery_urls) or []
     cover_image = pkg.cover_image_url or (gallery[0] if gallery else None)
+    agency = getattr(pkg, "agency", None)
     return DiscoverItem(
         id=pkg.id,
         slug=pkg.slug,
@@ -95,6 +100,8 @@ def _pkg_to_discover(pkg: Package, joined_count: int = 0) -> DiscoverItem:
         owner_id=None,
         agency_id=pkg.agency_id,
         joined_count=joined_count,
+        rating=agency.avg_rating if agency and agency.avg_rating else None,
+        rating_count=agency.review_count if agency else None,
     )
 
 
@@ -155,7 +162,7 @@ async def get_discover_feed(
     show_packages = not requesting_agency_id
 
     if filters.origin_type in (None, "plan"):
-        q = select(Plan).where(Plan.status == 'OPEN')
+        q = select(Plan).options(selectinload(Plan.creator)).where(Plan.status == 'OPEN')
         if requesting_agency_id:
             if filters.plan_type:
                 q = q.where(Plan.plan_type == filters.plan_type)
@@ -185,7 +192,7 @@ async def get_discover_feed(
         raw_plans = list(result.scalars().all())
 
     if show_packages and filters.origin_type in (None, "package"):
-        q = select(Package).where(Package.status == 'OPEN')
+        q = select(Package).options(selectinload(Package.agency)).where(Package.status == 'OPEN')
         if filters.destination:
             q = q.where(Package.destination.ilike(f"%{filters.destination}%"))
         if filters.budget_min:
@@ -245,6 +252,7 @@ async def get_trending(
 
     result = await db.execute(
         select(Package)
+        .options(selectinload(Package.agency))
         .where(Package.status == 'OPEN')
         .order_by(Package.created_at.desc())
         .offset((page - 1) * page_size)
@@ -272,6 +280,7 @@ async def search(
 
     plan_result = await db.execute(
         select(Plan)
+        .options(selectinload(Plan.creator))
         .where(*plan_conditions)
         .order_by(Plan.created_at.desc())
         .limit(page_size if not show_packages else page_size // 2)
@@ -282,6 +291,7 @@ async def search(
     if show_packages:
         pkg_result = await db.execute(
             select(Package)
+            .options(selectinload(Package.agency))
             .where(
                 Package.status == 'OPEN',
                 (Package.title.ilike(term) | Package.destination.ilike(term)),

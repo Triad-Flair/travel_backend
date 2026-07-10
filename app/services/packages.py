@@ -13,10 +13,12 @@ from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.agency import Agency
 from app.models.group import Group, GroupMember
 from app.models.package import Package
-from app.schemas.common import AgencyCard, AgencyPublicSummary
+from app.schemas.common import AgencyCard, AgencyPublicSummary, UserSummary
 from app.schemas.groups import GroupSummaryResponse
 from app.schemas.packages import CreatePackageRequest, PackageCardResponse, PackageDetails, PackageMeta, UpdatePackageRequest
-from app.schemas.plans import GroupSummary
+from app.schemas.plans import GroupMemberSummary, GroupSummary
+
+ACTIVE_MEMBER_STATUSES = ("APPROVED", "COMMITTED")
 
 
 def _calc_duration(start: datetime | None, end: datetime | None) -> int | None:
@@ -79,7 +81,46 @@ def _agency_to_summary(agency: Agency) -> AgencyPublicSummary:
     )
 
 
-def _group_to_summary(group: Group) -> GroupSummary:
+def _member_user_summary(user) -> UserSummary:
+    return UserSummary(
+        id=user.id,
+        full_name=user.display_name or user.username or "",
+        username=user.username,
+        avatar_url=user.avatar_url,
+        verification=user.verification_tier,
+        gender=user.gender,
+        city=user.location,
+        avg_rating=user.avg_rating,
+        completed_trips=user.completed_trips,
+    )
+
+
+async def _fetch_group_members(db: AsyncSession, group_id: str) -> list[GroupMemberSummary]:
+    """The group's currentSize/maleCount/femaleCount counters are
+    maintained independently of this query (incremented on join) — fetch the
+    real roster here so a page never shows a fill count with no one to
+    back it up."""
+    result = await db.execute(
+        select(GroupMember)
+        .options(selectinload(GroupMember.user))
+        .where(GroupMember.group_id == group_id, GroupMember.status.in_(ACTIVE_MEMBER_STATUSES))
+        .order_by(GroupMember.joined_at.asc())
+    )
+    members = result.scalars().all()
+    return [
+        GroupMemberSummary(
+            id=m.id,
+            role=m.role,
+            status=m.status,
+            joined_at=m.joined_at.isoformat() if m.joined_at else None,
+            user=_member_user_summary(m.user),
+        )
+        for m in members
+        if m.user
+    ]
+
+
+def _group_to_summary(group: Group, members: list[GroupMemberSummary] | None = None) -> GroupSummary:
     return GroupSummary(
         id=group.id,
         current_size=group.current_size or 0,
@@ -88,10 +129,13 @@ def _group_to_summary(group: Group) -> GroupSummary:
         other_count=group.other_count or 0,
         is_locked=bool(group.is_locked),
         payment_window_ends_at=group.payment_window_closes_at.isoformat() if group.payment_window_closes_at else None,
+        members=members,
     )
 
 
-def _pkg_to_details(pkg: Package, group: Group | None = None) -> PackageDetails:
+def _pkg_to_details(
+    pkg: Package, group: Group | None = None, members: list[GroupMemberSummary] | None = None
+) -> PackageDetails:
     gallery = _parse_json_list(pkg.gallery_urls)
     return PackageDetails(
         id=pkg.id,
@@ -117,7 +161,7 @@ def _pkg_to_details(pkg: Package, group: Group | None = None) -> PackageDetails:
         itinerary=_parse_json(pkg.itinerary),
         status=pkg.status,
         agency=_agency_to_summary(pkg.agency),
-        group=_group_to_summary(group) if group else None,
+        group=_group_to_summary(group, members) if group else None,
         created_at=pkg.created_at.isoformat(),
         updated_at=pkg.updated_at.isoformat(),
     )
@@ -187,7 +231,8 @@ async def get_package_by_slug(db: AsyncSession, slug: str) -> PackageDetails:
         raise NotFoundError("Package")
 
     group = await db.scalar(select(Group).where(Group.package_id == pkg.id))
-    details = _pkg_to_details(pkg, group)
+    members = await _fetch_group_members(db, group.id) if group else None
+    details = _pkg_to_details(pkg, group, members)
     await set_cached(cache_key, details.model_dump(by_alias=True), TTL_LONG)
     return details
 
@@ -202,7 +247,8 @@ async def get_package_by_id(db: AsyncSession, pkg_id: str) -> PackageDetails:
     if not pkg:
         raise NotFoundError("Package")
     group = await db.scalar(select(Group).where(Group.package_id == pkg.id))
-    return _pkg_to_details(pkg, group)
+    members = await _fetch_group_members(db, group.id) if group else None
+    return _pkg_to_details(pkg, group, members)
 
 
 async def list_my_packages(

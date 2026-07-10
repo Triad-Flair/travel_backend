@@ -23,6 +23,12 @@ class DiscoverItem(CamelModel):
     owner_id: str | None = None
     agency_id: str | None = None
     joined_count: int = 0
+    # Real rating of whoever is behind this listing — the agency for a
+    # package, the creator for a plan. Never a rating of the listing
+    # itself: packages/plans aren't reviewable objects (Review only ever
+    # targets an agency or a co-traveler), so there's nothing to aggregate.
+    rating: float | None = None
+    rating_count: int | None = None
 
 
 class DiscoverFilters(CamelModel):

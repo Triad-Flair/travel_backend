@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.cache import CacheKeys, TTL_LONG, get_cached, invalidate, invalidate_pattern, set_cached
 from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
-from app.models.group import Group
+from app.models.group import Group, GroupMember
 from app.models.offer import Offer
 from app.models.plan import Plan
 from app.models.user import User
@@ -18,6 +18,7 @@ from app.schemas.common import UserSummary
 from app.schemas.plans import (
     ConfirmPlanRequest,
     CreatePlanRequest,
+    GroupMemberSummary,
     GroupSummary,
     ItineraryItem,
     OfferInPlan,
@@ -26,6 +27,8 @@ from app.schemas.plans import (
     ReferPlanRequest,
     UpdatePlanRequest,
 )
+
+ACTIVE_MEMBER_STATUSES = ("APPROVED", "COMMITTED")
 
 
 def _user_to_summary(user: User) -> UserSummary:
@@ -70,9 +73,26 @@ def _parse_json_list(raw: object) -> list | None:
 
 
 def _group_to_summary(group: Group) -> GroupSummary:
+    """group.members must be eager-loaded (selectinload) by the caller —
+    the currentSize/maleCount/femaleCount counters are maintained
+    independently of this list, so without it a page could show a nonzero
+    fill count with no one to back it up."""
     pw_end = None
     if group.payment_window_closes_at:
         pw_end = group.payment_window_closes_at.isoformat()
+    members = None
+    if group.members is not None:
+        members = [
+            GroupMemberSummary(
+                id=m.id,
+                role=m.role,
+                status=m.status,
+                joined_at=m.joined_at.isoformat() if m.joined_at else None,
+                user=_user_to_summary(m.user),
+            )
+            for m in sorted(group.members, key=lambda m: m.joined_at.isoformat() if m.joined_at else "")
+            if m.status in ACTIVE_MEMBER_STATUSES and m.user
+        ]
     return GroupSummary(
         id=group.id,
         current_size=group.current_size,
@@ -81,6 +101,7 @@ def _group_to_summary(group: Group) -> GroupSummary:
         other_count=group.other_count,
         is_locked=group.is_locked,
         payment_window_ends_at=pw_end,
+        members=members,
     )
 
 
@@ -211,7 +232,7 @@ async def get_plan_by_slug(db: AsyncSession, slug: str) -> PlanDetails:
         select(Plan)
         .options(
             selectinload(Plan.creator),
-            selectinload(Plan.group),
+            selectinload(Plan.group).selectinload(Group.members).selectinload(GroupMember.user),
             selectinload(Plan.offers).selectinload(Offer.agency),
             selectinload(Plan.offers).selectinload(Offer.negotiations),
         )
@@ -228,7 +249,7 @@ async def get_plan_by_id(db: AsyncSession, plan_id: str) -> PlanDetails:
         select(Plan)
         .options(
             selectinload(Plan.creator),
-            selectinload(Plan.group),
+            selectinload(Plan.group).selectinload(Group.members).selectinload(GroupMember.user),
             selectinload(Plan.offers).selectinload(Offer.agency),
             selectinload(Plan.offers).selectinload(Offer.negotiations),
         )
@@ -313,7 +334,10 @@ async def update_plan(
 ) -> PlanDetails:
     result = await db.execute(
         select(Plan)
-        .options(selectinload(Plan.creator), selectinload(Plan.group))
+        .options(
+            selectinload(Plan.creator),
+            selectinload(Plan.group).selectinload(Group.members).selectinload(GroupMember.user),
+        )
         .where(Plan.id == plan_id)
     )
     plan = result.scalar_one_or_none()
@@ -351,7 +375,10 @@ async def update_plan(
 async def publish_plan(db: AsyncSession, plan_id: str, user_id: str) -> PlanDetails:
     result = await db.execute(
         select(Plan)
-        .options(selectinload(Plan.creator), selectinload(Plan.group))
+        .options(
+            selectinload(Plan.creator),
+            selectinload(Plan.group).selectinload(Group.members).selectinload(GroupMember.user),
+        )
         .where(Plan.id == plan_id)
     )
     plan = result.scalar_one_or_none()
