@@ -6,6 +6,7 @@ from app.dependencies import CurrentUser, get_current_user, get_optional_user
 from app.schemas.agencies import (
     CreateAgencyRequest,
     GstVerifyResponse,
+    IfscLookupResponse,
     InviteMemberRequest,
     UpdateAgencyRequest,
 )
@@ -41,6 +42,11 @@ async def browse(
 @router.get("/gst/verify", response_model=GstVerifyResponse)
 async def verify_gst(gstin: str = Query(...), db: AsyncSession = Depends(get_db)):
     return await ag_svc.verify_gst(gstin)
+
+
+@router.get("/ifsc/lookup", response_model=IfscLookupResponse)
+async def lookup_ifsc(code: str = Query(...)):
+    return await ag_svc.lookup_ifsc(code)
 
 
 @router.post("", status_code=201)

@@ -12,12 +12,14 @@ from sqlalchemy.orm import selectinload
 from app.core.cache import CacheKeys, TTL_MEDIUM, get_cached, invalidate, set_cached
 from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.lib.gst import verify_gstin
+from app.lib.ifsc import lookup_ifsc as lookup_ifsc_code
 from app.models.agency import Agency, AgencyBankAccount, AgencyMember, AgencyWallet
 from app.models.social import Review
 from app.schemas.agencies import (
     AgencyProfile,
     CreateAgencyRequest,
     GstVerifyResponse,
+    IfscLookupResponse,
     UpdateAgencyRequest,
 )
 from app.schemas.common import AgencyPublicSummary, AgencySummary
@@ -252,6 +254,17 @@ async def create_agency(db: AsyncSession, owner_id: str, req: CreateAgencyReques
     return _to_profile(agency)
 
 
+def _assert_gstin_pan_immutable(agency: Agency, gstin: str | None, pan: str | None) -> None:
+    """GSTIN and PAN are collected once at signup/verification and never
+    editable afterward — matches compliance expectations for documents tied
+    to escrow payouts. A resubmission of the same value is a no-op, not an
+    error, since forms round-trip the existing value back unchanged."""
+    if gstin and agency.gstin and gstin != agency.gstin:
+        raise BadRequestError("GSTIN cannot be changed once submitted")
+    if pan and agency.pan and pan != agency.pan:
+        raise BadRequestError("PAN cannot be changed once submitted")
+
+
 async def update_agency(
     db: AsyncSession, agency_id: str, user_id: str, req: UpdateAgencyRequest
 ) -> AgencyProfile:
@@ -261,6 +274,8 @@ async def update_agency(
         raise NotFoundError("Agency")
     if agency.owner_id != user_id:
         raise ForbiddenError()
+
+    _assert_gstin_pan_immutable(agency, req.gstin, req.pan)
 
     for field, value in req.model_dump(exclude_none=True).items():
         if field in ("specializations", "destinations") and isinstance(value, list):
@@ -308,6 +323,20 @@ async def verify_gst(gstin: str) -> GstVerifyResponse:
     )
 
 
+async def lookup_ifsc(code: str) -> IfscLookupResponse:
+    result = await lookup_ifsc_code(code)
+    return IfscLookupResponse(
+        ifsc=code,
+        valid=result.get("valid", False),
+        bank=result.get("bank"),
+        branch=result.get("branch"),
+        address=result.get("address"),
+        city=result.get("city"),
+        state=result.get("state"),
+        district=result.get("district"),
+    )
+
+
 async def submit_verification(
     db: AsyncSession,
     agency_id: str,
@@ -319,6 +348,8 @@ async def submit_verification(
         raise NotFoundError("Agency")
     if agency.owner_id != user_id:
         raise ForbiddenError("Only agency owner can submit verification")
+
+    _assert_gstin_pan_immutable(agency, payload.get("gstin"), payload.get("pan"))
 
     for field in (
         "gstin",
@@ -401,19 +432,21 @@ async def get_bank_record(db: AsyncSession, agency_id: str, user_id: str) -> dic
     if not bank:
         raise NotFoundError("Bank record")
 
+    is_verified = bank.verification_status == "VERIFIED"
     return {
         "id": bank.id,
         "accountHolderName": bank.account_holder_name,
         "bankName": bank.bank_name,
+        "branchName": bank.branch_name,
         "maskedAccountNumber": _mask_account(bank.account_number_encrypted),
         "ifscCode": bank.ifsc_code,
         "razorpayAccountId": bank.razorpay_account_id,
-        "verificationStatus": "VERIFIED" if bank.is_verified else "PENDING",
-        "nameMatchScore": 100 if bank.is_verified else None,
-        "nameMatchPassed": bool(bank.is_verified),
-        "verifiedAt": bank.updated_at.isoformat() if bank.is_verified and bank.updated_at else None,
+        "verificationStatus": bank.verification_status,
+        "nameMatchScore": 100 if is_verified else None,
+        "nameMatchPassed": is_verified,
+        "verifiedAt": bank.updated_at.isoformat() if is_verified and bank.updated_at else None,
         "retryCount": 0,
-        "message": "Bank account verified" if bank.is_verified else "Verification pending",
+        "message": "Bank account verified" if is_verified else "Verification pending",
     }
 
 
@@ -433,15 +466,25 @@ async def verify_bank_account(
     ifsc_code = str(payload.get("ifscCode") or "").strip().upper()
     account_holder_name = str(payload.get("accountHolderName") or "").strip()
     bank_name = str(payload.get("bankName") or "").strip() or None
+    branch_name = str(payload.get("branchName") or "").strip() or None
     # Razorpay Route linked account id (e.g. "acc_...") — set once the agency
     # has been onboarded through Razorpay's own Linked Account/KYC flow,
     # which is separate from (and not built as part of) this endpoint.
     razorpay_account_id = str(payload.get("razorpayAccountId") or "").strip() or None
+    # Explicit intent flag — the settings UI only sends this once the owner
+    # clicks "Change bank details" on an already-verified record. Without it,
+    # a verified record can't be silently overwritten by resubmitting the form.
+    confirm_change = bool(payload.get("confirmChange"))
 
     if not account_number or not ifsc_code or not account_holder_name:
         raise BadRequestError("Account number, IFSC code, and account holder name are required")
 
     bank = await db.scalar(select(AgencyBankAccount).where(AgencyBankAccount.agency_id == agency_id))
+    if bank and bank.verification_status == "VERIFIED" and not confirm_change:
+        raise BadRequestError(
+            "Bank details are already verified and locked. Use 'Change bank details' to submit new ones."
+        )
+
     if not bank:
         bank = AgencyBankAccount(
             id=str(uuid.uuid4()),
@@ -450,8 +493,9 @@ async def verify_bank_account(
             ifsc_code=ifsc_code,
             account_holder_name=account_holder_name,
             bank_name=bank_name,
+            branch_name=branch_name,
             razorpay_account_id=razorpay_account_id,
-            is_verified=True,
+            verification_status="VERIFIED",
         )
         db.add(bank)
     else:
@@ -459,9 +503,10 @@ async def verify_bank_account(
         bank.ifsc_code = ifsc_code
         bank.account_holder_name = account_holder_name
         bank.bank_name = bank_name
+        bank.branch_name = branch_name
         if razorpay_account_id:
             bank.razorpay_account_id = razorpay_account_id
-        bank.is_verified = True
+        bank.verification_status = "VERIFIED"
 
     await db.flush()
 
@@ -469,6 +514,7 @@ async def verify_bank_account(
         "id": bank.id,
         "accountHolderName": bank.account_holder_name,
         "bankName": bank.bank_name,
+        "branchName": bank.branch_name,
         "maskedAccountNumber": _mask_account(bank.account_number_encrypted),
         "ifscCode": bank.ifsc_code,
         "razorpayAccountId": bank.razorpay_account_id,

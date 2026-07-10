@@ -14,6 +14,7 @@ class ItineraryItem(CamelModel):
     meals: list[str] | None = None
     accommodation: str | None = None
     transport: str | None = None
+    images: list[str] | None = None
 
 
 class Negotiation(CamelModel):

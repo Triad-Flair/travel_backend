@@ -365,6 +365,7 @@ async def publish_plan(db: AsyncSession, plan_id: str, user_id: str) -> PlanDeta
     plan.status = "OPEN"
     plan.expires_at = datetime.now(UTC) + timedelta(days=30)
     await db.flush()
+    await db.refresh(plan)
     await invalidate(CacheKeys.plan_detail(plan_id))
     await invalidate_pattern("discover:*")
     return _plan_to_details(plan)

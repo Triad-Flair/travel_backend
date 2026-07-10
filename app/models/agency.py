@@ -135,7 +135,16 @@ class AgencyBankAccount(TimestampsMixin, BaseModel):
     ifsc_code: Mapped[str | None] = mapped_column("encryptedIfsc", Text, nullable=True)
     account_holder_name: Mapped[str] = mapped_column("accountHolderName", String(100), nullable=False)
     bank_name: Mapped[str | None] = mapped_column("bankName", String(100), nullable=True)
-    is_verified: Mapped[bool] = mapped_column("verificationStatus", Boolean, default=False, nullable=False)
+    branch_name: Mapped[str | None] = mapped_column("branchName", String(150), nullable=True)
+    # DB column is a real enum (PENDING/VERIFIED/FAILED/NAME_MISMATCH/
+    # MAX_RETRIES_EXCEEDED) — this was previously mismapped as Boolean,
+    # which made every INSERT/UPDATE fail with a DatatypeMismatchError.
+    verification_status: Mapped[str] = mapped_column(
+        "verificationStatus",
+        PgEnum("PENDING", "VERIFIED", "FAILED", "NAME_MISMATCH", "MAX_RETRIES_EXCEEDED", name="BankVerificationStatus", create_type=False),
+        default="PENDING",
+        nullable=False,
+    )
     razorpay_account_id: Mapped[str | None] = mapped_column("razorpayAccountId", String(50), nullable=True)
 
     agency = relationship("Agency", lazy="noload")

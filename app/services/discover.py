@@ -156,8 +156,14 @@ async def get_discover_feed(
 
     if filters.origin_type in (None, "plan"):
         q = select(Plan).where(Plan.status == 'OPEN')
-        if filters.plan_type:
-            q = q.where(Plan.plan_type == filters.plan_type)
+        if requesting_agency_id:
+            if filters.plan_type:
+                q = q.where(Plan.plan_type == filters.plan_type)
+        else:
+            # Corporate plans are private to the organizing traveler and the
+            # agencies bidding on them — never surfaced to other travelers,
+            # regardless of what planType filter is requested.
+            q = q.where(Plan.plan_type == 'STANDARD')
         if filters.destination:
             q = q.where(Plan.destination.ilike(f"%{filters.destination}%"))
         if filters.budget_min:
@@ -256,12 +262,17 @@ async def search(
     items: list[DiscoverItem] = []
     show_packages = not requesting_agency_id
 
+    plan_conditions = [
+        Plan.status == 'OPEN',
+        (Plan.title.ilike(term) | Plan.destination.ilike(term)),
+    ]
+    if not requesting_agency_id:
+        # Corporate plans are private — never surfaced in search to other travelers.
+        plan_conditions.append(Plan.plan_type == 'STANDARD')
+
     plan_result = await db.execute(
         select(Plan)
-        .where(
-            Plan.status == 'OPEN',
-            (Plan.title.ilike(term) | Plan.destination.ilike(term)),
-        )
+        .where(*plan_conditions)
         .order_by(Plan.created_at.desc())
         .limit(page_size if not show_packages else page_size // 2)
     )

@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user
+from app.exceptions import ForbiddenError
+from app.models.enums import UserRole
 from app.schemas.plans import (
     ConfirmPlanRequest,
     CreatePlanRequest,
@@ -36,8 +38,12 @@ async def list_my_plans(
 async def list_corporate_open(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Corporate plans are private to the organizing traveler and the
+    # agencies bidding on them — never a public listing.
+    current_user.require_agency()
     items, _total = await plan_svc.list_open_corporate_plans(db, page, page_size)
     return items
 
@@ -53,6 +59,8 @@ async def create(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if req.plan_type == "CORPORATE" and current_user.role == UserRole.AGENCY_ADMIN:
+        raise ForbiddenError("Agency accounts cannot create corporate trip requests")
     return await plan_svc.create_plan(db, current_user.user_id, req)
 
 

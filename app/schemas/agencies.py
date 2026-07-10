@@ -67,6 +67,17 @@ class GstVerifyResponse(CamelModel):
     status: str | None = None
 
 
+class IfscLookupResponse(CamelModel):
+    ifsc: str
+    valid: bool
+    bank: str | None = None
+    branch: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    district: str | None = None
+
+
 class AgencyMemberResponse(CamelModel):
     id: str
     role: str

@@ -224,6 +224,13 @@ async def join_group(
             user=_user_summary(user),
         )
 
+    if group.plan_id:
+        plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id))
+        if plan and plan.plan_type == "CORPORATE":
+            raise ForbiddenError(
+                "Corporate trip groups are private to the organizing company and its agency"
+            )
+
     if member:
         member.status = "INTERESTED"
         member.joined_at = datetime.now(UTC)
