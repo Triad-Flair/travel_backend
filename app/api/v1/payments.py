@@ -249,14 +249,21 @@ async def razorpay_webhook(
 ):
     body = await request.body()
 
-    # A missing header must be rejected the same as a bad one — omitting
-    # X-Razorpay-Signature previously skipped verification entirely, letting
-    # anyone POST a forged "payment.captured" body and mark any pending
-    # payment as paid. Only relax this when no webhook secret is configured
-    # at all (local/dev before Razorpay is wired up).
-    if settings.razorpay_webhook_secret:
-        if not x_razorpay_signature or not verify_webhook_signature(body, x_razorpay_signature):
-            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+    # Fail closed, always — this endpoint mutates payment state with zero
+    # other auth. A missing header used to skip verification entirely
+    # (`if x_razorpay_signature and not verify(...)` is vacuously true when
+    # the header is absent), letting anyone POST a forged "payment.captured"
+    # body and mark any pending payment as paid. An unconfigured secret is
+    # equally dangerous — silently allowing unsigned webhooks through is
+    # exactly the misconfiguration this check exists to catch, not a case to
+    # special-case around. RAZORPAY_WEBHOOK_SECRET must be set from the
+    # Razorpay Dashboard (Settings → Webhooks) before this endpoint can
+    # process anything; the primary capture path (/payments/verify, always
+    # signature-checked) keeps working regardless.
+    if not settings.razorpay_webhook_secret or not x_razorpay_signature or not verify_webhook_signature(
+        body, x_razorpay_signature
+    ):
+        raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
     try:
         data = json.loads(body)

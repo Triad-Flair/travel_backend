@@ -72,32 +72,38 @@ def test_webhook_rejects_wrong_signature_when_secret_configured():
     assert response.status_code == 400
 
 
-def test_webhook_allows_missing_signature_only_when_no_secret_configured():
-    """Dev/local mode before Razorpay is wired up — must not block testing,
-    but this only applies when the webhook secret itself is unset."""
+def test_webhook_rejects_everything_when_secret_unconfigured():
+    """Fails closed, not open — an unconfigured RAZORPAY_WEBHOOK_SECRET must
+    never be treated as 'skip verification'. This endpoint mutates payment
+    state with no other auth, so a misconfiguration must block processing,
+    not silently trust the request."""
     app = _build_test_app()
     client = TestClient(app)
 
     with patch("app.api.v1.payments.settings") as mock_settings, \
-         patch("app.api.v1.payments.pay_svc.handle_razorpay_webhook", new=AsyncMock()):
+         patch("app.api.v1.payments.pay_svc.handle_razorpay_webhook", new=AsyncMock()) as mock_handle:
         mock_settings.razorpay_webhook_secret = ""
         response = client.post(
             "/api/v1/payments/webhook/razorpay",
             content=b'{"event": "payment.captured", "payload": {}}',
+            headers={"X-Razorpay-Signature": "anything"},
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
+    mock_handle.assert_not_called()
 
 
 def test_webhook_rejects_malformed_json_body():
     app = _build_test_app()
     client = TestClient(app)
 
-    with patch("app.api.v1.payments.settings") as mock_settings:
-        mock_settings.razorpay_webhook_secret = ""
+    with patch("app.api.v1.payments.settings") as mock_settings, \
+         patch("app.api.v1.payments.verify_webhook_signature", return_value=True):
+        mock_settings.razorpay_webhook_secret = "whsec_configured"
         response = client.post(
             "/api/v1/payments/webhook/razorpay",
             content=b"not-json{{{",
+            headers={"X-Razorpay-Signature": "valid-per-mock"},
         )
 
     assert response.status_code == 400
