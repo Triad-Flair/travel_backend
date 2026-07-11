@@ -43,6 +43,7 @@ class PaymentRecordResponse(CamelModel):
     escrow_status: str
     tranche1_released: bool
     tranche2_released: bool
+    payout_frozen: bool = False
     points_redeemed: int = 0
     wallet_amount_used: int | str = 0
     trip_amount: int | None = None
@@ -113,6 +114,8 @@ class DisputeResponse(CamelModel):
     payment_id: str
     reason: str
     status: str
+    source: str = "CUSTOMER"
+    razorpay_dispute_id: str | None = None
     created_at: str
 
 

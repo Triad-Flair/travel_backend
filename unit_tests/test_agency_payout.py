@@ -18,6 +18,7 @@ def _fake_payment(**overrides):
         tranche2_released=False,
         escrow_status="HELD",
         transfer_status=None,
+        payout_frozen=False,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

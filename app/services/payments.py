@@ -11,7 +11,7 @@ from app.lib.email import (
     send_agency_booking_invoice_email,
     send_agency_payout_update_email,
 )
-from app.lib.razorpay_client import create_order, create_transfer, verify_signature
+from app.lib.razorpay_client import capture_payment, create_order, create_transfer, verify_signature
 from app.models.agency import Agency, AgencyBankAccount, AgencyTransaction, AgencyWallet
 from app.models.group import Group, GroupMember
 from app.models.loyalty import LoyaltyPointsLedger, ReferralWallet
@@ -87,6 +87,7 @@ def _payment_to_response(payment: Payment) -> PaymentRecordResponse:
         escrow_status=payment.escrow_status,
         tranche1_released=bool(payment.tranche1_released),
         tranche2_released=bool(payment.tranche2_released),
+        payout_frozen=bool(payment.payout_frozen),
         points_redeemed=int(payment.points_redeemed or 0),
         wallet_amount_used=int(payment.wallet_amount_used or 0),
         trip_amount=int(payment.trip_amount or 0),
@@ -571,6 +572,18 @@ async def mock_capture(db: AsyncSession, req: MockCaptureRequest, user_id: str) 
     return _payment_to_response(payment)
 
 
+def _dispute_to_response(dispute: Dispute) -> DisputeResponse:
+    return DisputeResponse(
+        id=dispute.id,
+        payment_id=dispute.payment_id,
+        reason=dispute.reason,
+        status=dispute.status,
+        source=dispute.source,
+        razorpay_dispute_id=dispute.razorpay_dispute_id,
+        created_at=dispute.created_at.isoformat(),
+    )
+
+
 async def create_dispute(db: AsyncSession, req: CreateDisputeRequest, user_id: str) -> DisputeResponse:
     payment = await db.scalar(select(Payment).where(Payment.id == req.payment_id))
     if not payment:
@@ -578,32 +591,27 @@ async def create_dispute(db: AsyncSession, req: CreateDisputeRequest, user_id: s
     if payment.user_id != user_id:
         raise ForbiddenError("You cannot dispute this payment")
 
-    dispute = await db.scalar(select(Dispute).where(Dispute.payment_id == payment.id))
+    # Scoped to source == CUSTOMER: a Razorpay chargeback (source ==
+    # RAZORPAY_CHARGEBACK) can already exist on this payment without the
+    # traveler ever filing anything — returning that record here would
+    # mislabel a bank chargeback as their own support ticket.
+    dispute = await db.scalar(
+        select(Dispute).where(Dispute.payment_id == payment.id, Dispute.source == "CUSTOMER")
+    )
     if dispute:
-        return DisputeResponse(
-            id=dispute.id,
-            payment_id=dispute.payment_id,
-            reason=dispute.reason,
-            status=dispute.status,
-            created_at=dispute.created_at.isoformat(),
-        )
+        return _dispute_to_response(dispute)
 
     dispute = Dispute(
         id=str(uuid.uuid4()),
         payment_id=payment.id,
         reason=req.reason,
         status="OPEN",
+        source="CUSTOMER",
     )
     db.add(dispute)
     await db.flush()
 
-    return DisputeResponse(
-        id=dispute.id,
-        payment_id=dispute.payment_id,
-        reason=dispute.reason,
-        status=dispute.status,
-        created_at=dispute.created_at.isoformat(),
-    )
+    return _dispute_to_response(dispute)
 
 
 async def get_agency_wallet_summary(db: AsyncSession, agency_id: str) -> AgencyWalletSummary:
@@ -650,27 +658,191 @@ async def list_agency_wallet_transactions(db: AsyncSession, agency_id: str) -> l
     ]
 
 
+DISPUTE_EVENT_STATUS = {
+    "payment.dispute.created": "OPEN",
+    "payment.dispute.under_review": "UNDER_REVIEW",
+    "payment.dispute.action_required": "ACTION_REQUIRED",
+    "payment.dispute.won": "WON",
+    "payment.dispute.lost": "LOST",
+    "payment.dispute.closed": "CLOSED",
+}
+DISPUTE_STATUSES_FREEZE_PAYOUT = {"OPEN", "UNDER_REVIEW", "ACTION_REQUIRED"}
+DISPUTE_STATUSES_UNFREEZE_PAYOUT = {"WON", "CLOSED"}
+
+
 async def handle_razorpay_webhook(db: AsyncSession, event: str, payload: dict) -> None:
-    order_id = payload.get("order_id")
+    """Dispatches every Razorpay event this account can emit. `payload` is
+    the raw `data["payload"]` dict — each event category nests its entity
+    under a different key (payment/order/dispute/invoice/payment_link), so
+    extraction is each handler's own responsibility rather than done once
+    up front for a shape that's only correct for payment.* events."""
+    if event in ("payment.captured", "order.paid"):
+        await _handle_payment_captured(db, payload)
+    elif event == "payment.failed":
+        await _handle_payment_failed(db, payload)
+    elif event == "payment.authorized":
+        await _handle_payment_authorized(db, payload)
+    elif event in DISPUTE_EVENT_STATUS:
+        await _handle_payment_dispute(db, event, payload)
+    elif event.startswith("payment.downtime."):
+        _handle_payment_downtime(event, payload)
+    elif event in ("order.notification.delivered", "order.notification.failed"):
+        # Informational — Razorpay's own reminder-email delivery status for
+        # an unpaid order. No payment state to change.
+        logger.info("Razorpay webhook %s received (informational, no action)", event)
+    elif event.startswith("invoice.") or event.startswith("payment_link."):
+        # Razorpay Invoicing and Payment Links are separate Razorpay
+        # products this platform's checkout never creates (create_order is
+        # the only order-creation path, via the Orders API) — these can only
+        # fire if someone starts using those products from the same
+        # account. Logged rather than silently dropped so that's visible if
+        # it ever happens, instead of pretending to handle a flow that
+        # doesn't exist here.
+        logger.info("Razorpay webhook %s received but this product isn't used by the platform — no-op", event)
+    else:
+        logger.warning("Unhandled Razorpay webhook event: %s", event)
+
+
+async def _handle_payment_captured(db: AsyncSession, payload: dict) -> None:
+    payment_entity = payload.get("payment", {}).get("entity", {})
+    order_id = payment_entity.get("order_id")
     if not order_id:
         return
 
     payment = await db.scalar(select(Payment).where(Payment.razorpay_order_id == order_id))
     if not payment:
+        logger.warning("payment.captured/order.paid webhook for unknown order_id=%s", order_id)
+        return
+    if payment.status == "CAPTURED":
+        # order.paid and payment.captured both fire for the same
+        # transition — this makes handling either, or both, idempotent.
         return
 
-    # order.paid fires alongside (and sometimes ahead of) payment.captured —
-    # Razorpay includes the same payment entity in both, so treat them as
-    # equivalent triggers. The CAPTURED check makes handling either (or both,
-    # for the same payment) idempotent.
-    if event in ("payment.captured", "order.paid") and payment.status != "CAPTURED":
-        payment.razorpay_payment_id = payload.get("id") or payment.razorpay_payment_id
-        await _finalize_capture(db, payment)
-        await db.flush()
+    captured_amount = payment_entity.get("amount")
+    if captured_amount is not None and int(captured_amount) != int(payment.amount):
+        # The signature already proves this came from Razorpay, so the
+        # money genuinely moved for this amount — record it rather than
+        # drop it, but a mismatch points at a bug in our own price
+        # computation (coupon/wallet edge case, a race on order creation)
+        # that needs a human, not fraud to block the capture on.
+        logger.error(
+            "Amount mismatch on capture for payment %s: expected %s paise, Razorpay reports %s paise",
+            payment.id, payment.amount, captured_amount,
+        )
 
-    if event == "payment.failed":
-        payment.status = "FAILED"
-        await db.flush()
+    payment.razorpay_payment_id = payment_entity.get("id") or payment.razorpay_payment_id
+    await _finalize_capture(db, payment)
+    await db.flush()
+
+
+async def _handle_payment_failed(db: AsyncSession, payload: dict) -> None:
+    payment_entity = payload.get("payment", {}).get("entity", {})
+    order_id = payment_entity.get("order_id")
+    if not order_id:
+        return
+
+    payment = await db.scalar(select(Payment).where(Payment.razorpay_order_id == order_id))
+    if not payment or payment.status == "CAPTURED":
+        # Out-of-order delivery (a late/retried failed event arriving after
+        # a later capture already succeeded) must never downgrade a
+        # successfully captured payment back to FAILED.
+        return
+
+    payment.status = "FAILED"
+    await db.flush()
+
+
+async def _handle_payment_authorized(db: AsyncSession, payload: dict) -> None:
+    payment_entity = payload.get("payment", {}).get("entity", {})
+    order_id = payment_entity.get("order_id")
+    if not order_id:
+        return
+
+    payment = await db.scalar(select(Payment).where(Payment.razorpay_order_id == order_id))
+    if not payment or payment.status == "CAPTURED":
+        return
+
+    razorpay_payment_id = payment_entity.get("id")
+    payment.status = "AUTHORIZED"
+    if razorpay_payment_id:
+        payment.razorpay_payment_id = razorpay_payment_id
+    await db.flush()
+
+    # This checkout flow always wants immediate full capture (create_order
+    # never sets payment_capture=0) — an AUTHORIZED payment almost always
+    # means the Razorpay account's auto-capture setting is off for this
+    # payment method. Capture explicitly rather than let the authorization
+    # expire (Razorpay auto-voids/refunds an uncaptured authorization after
+    # a few days), which would otherwise silently fail the traveler's
+    # booking with no signal to us.
+    if razorpay_payment_id:
+        try:
+            capture_payment(razorpay_payment_id, int(payment.amount))
+        except PaymentError:
+            logger.exception("Explicit capture failed for authorized payment %s", payment.id)
+            # Left AUTHORIZED — a retried webhook, a later payment.captured
+            # event, or manual admin action can still resolve this.
+
+
+async def _handle_payment_dispute(db: AsyncSession, event: str, payload: dict) -> None:
+    dispute_entity = payload.get("dispute", {}).get("entity", {})
+    payment_entity = payload.get("payment", {}).get("entity", {})
+    razorpay_dispute_id = dispute_entity.get("id")
+    order_id = payment_entity.get("order_id")
+    if not razorpay_dispute_id or not order_id:
+        logger.warning("Malformed dispute webhook for event %s", event)
+        return
+
+    payment = await db.scalar(select(Payment).where(Payment.razorpay_order_id == order_id))
+    if not payment:
+        logger.warning("Dispute webhook %s for unknown order_id=%s", event, order_id)
+        return
+
+    new_status = DISPUTE_EVENT_STATUS[event]
+    dispute = await db.scalar(select(Dispute).where(Dispute.razorpay_dispute_id == razorpay_dispute_id))
+    if dispute:
+        dispute.status = new_status
+    else:
+        dispute = Dispute(
+            id=str(uuid.uuid4()),
+            payment_id=payment.id,
+            reason=dispute_entity.get("reason_code") or "razorpay_chargeback",
+            status=new_status,
+            source="RAZORPAY_CHARGEBACK",
+            razorpay_dispute_id=razorpay_dispute_id,
+        )
+        db.add(dispute)
+
+    # Freeze payouts the instant a chargeback opens — releasing tranche2 to
+    # the agency while Razorpay might claw the funds back leaves the
+    # platform holding the loss with no recourse from the agency. LOST stays
+    # frozen: the funds are gone, and if a tranche was already paid out an
+    # admin has to reconcile it manually — there's no automatic clawback
+    # from the agency wallet here, deliberately, since debiting it
+    # automatically could take a balance negative.
+    if new_status in DISPUTE_STATUSES_FREEZE_PAYOUT:
+        payment.payout_frozen = True
+    elif new_status in DISPUTE_STATUSES_UNFREEZE_PAYOUT:
+        payment.payout_frozen = False
+
+    await db.flush()
+    logger.warning("Razorpay dispute %s -> %s for payment %s", razorpay_dispute_id, new_status, payment.id)
+
+    if settings.platform_admin_email:
+        from app.workers.tasks import send_dispute_alert_email_task
+        send_dispute_alert_email_task.delay(dispute.id, event)
+
+
+def _handle_payment_downtime(event: str, payload: dict) -> None:
+    # Informational — describes degraded availability of a payment method
+    # (e.g. a bank's UPI being down), not tied to any single order/payment.
+    # No order_id exists to correlate against, so there's no Payment row to
+    # update; logged so it's visible to whoever watches application logs.
+    downtime_entity = payload.get("payment", {}).get("downtime", {}).get("entity", {})
+    logger.warning(
+        "Razorpay downtime %s: id=%s method=%s status=%s",
+        event, downtime_entity.get("id"), downtime_entity.get("method"), downtime_entity.get("status"),
+    )
 
 
 async def get_checkout_breakdown(
@@ -713,6 +885,8 @@ async def list_disputes_for_agency(db: AsyncSession, agency_id: str) -> list[dic
             "paymentId": dispute.payment_id,
             "reason": dispute.reason,
             "status": dispute.status,
+            "source": dispute.source,
+            "razorpayDisputeId": dispute.razorpay_dispute_id,
             "createdAt": dispute.created_at.isoformat(),
         }
         for dispute in rows.scalars().all()
@@ -724,6 +898,15 @@ async def resolve_dispute(db: AsyncSession, dispute_id: str, resolution: str, no
     if not dispute:
         raise NotFoundError("Dispute")
     dispute.status = "RESOLVED"
+
+    # An admin manually resolving is treated as authoritative — unfreeze any
+    # payout this dispute was holding back, even for a RAZORPAY_CHARGEBACK
+    # record (webhook events normally drive that lifecycle, but an admin
+    # override here shouldn't leave a payment stuck frozen with no path out).
+    payment = await db.scalar(select(Payment).where(Payment.id == dispute.payment_id))
+    if payment and payment.payout_frozen:
+        payment.payout_frozen = False
+
     await db.flush()
     return {
         "id": dispute.id,
@@ -787,6 +970,11 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
     payment = await db.scalar(select(Payment).where(Payment.id == payment_id))
     if not payment:
         raise NotFoundError("Payment")
+
+    if payment.payout_frozen:
+        raise BadRequestError(
+            "This payment has an open Razorpay chargeback — payouts are frozen until it's resolved."
+        )
 
     already_released = bool(payment.tranche2_released) if tranche == "tranche2" else bool(payment.tranche1_released)
     if already_released:

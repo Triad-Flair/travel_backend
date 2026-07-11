@@ -109,6 +109,24 @@ def test_webhook_rejects_malformed_json_body():
     assert response.status_code == 400
 
 
+def test_webhook_rejects_oversized_content_length_before_touching_body():
+    """A forged huge Content-Length must be rejected before we even read the
+    body — cheap DoS defense that doesn't depend on signature verification
+    (which itself requires reading the whole body first)."""
+    app = _build_test_app()
+    client = TestClient(app)
+
+    with patch("app.api.v1.payments.settings") as mock_settings:
+        mock_settings.razorpay_webhook_secret = "whsec_configured"
+        response = client.post(
+            "/api/v1/payments/webhook/razorpay",
+            content=b"{}",
+            headers={"Content-Length": str(500 * 1024)},
+        )
+
+    assert response.status_code == 413
+
+
 # ── Service: order.paid must be treated as equivalent to payment.captured ──
 
 @pytest.mark.asyncio
@@ -119,7 +137,8 @@ async def test_handle_webhook_finalizes_capture_on_order_paid_event():
 
     with patch("app.services.payments._finalize_capture", new=AsyncMock()) as mock_finalize:
         await handle_razorpay_webhook(
-            db, "order.paid", {"order_id": "order_abc", "id": "pay_xyz"}
+            db, "order.paid",
+            {"payment": {"entity": {"order_id": "order_abc", "id": "pay_xyz", "amount": None}}},
         )
 
     mock_finalize.assert_called_once_with(db, payment)
@@ -135,7 +154,9 @@ async def test_handle_webhook_is_idempotent_across_captured_and_order_paid():
     db.scalar = AsyncMock(return_value=payment)
 
     with patch("app.services.payments._finalize_capture", new=AsyncMock()) as mock_finalize:
-        await handle_razorpay_webhook(db, "order.paid", {"order_id": "order_abc"})
+        await handle_razorpay_webhook(
+            db, "order.paid", {"payment": {"entity": {"order_id": "order_abc"}}}
+        )
 
     mock_finalize.assert_not_called()
 
@@ -146,6 +167,8 @@ async def test_handle_webhook_ignores_unknown_order_id():
     db.scalar = AsyncMock(return_value=None)
 
     with patch("app.services.payments._finalize_capture", new=AsyncMock()) as mock_finalize:
-        await handle_razorpay_webhook(db, "payment.captured", {"order_id": "order_does_not_exist"})
+        await handle_razorpay_webhook(
+            db, "payment.captured", {"payment": {"entity": {"order_id": "order_does_not_exist"}}}
+        )
 
     mock_finalize.assert_not_called()

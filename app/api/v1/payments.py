@@ -241,13 +241,25 @@ async def agency_payout(
     return await pay_svc.execute_agency_payout(db, payment_id, tranche)
 
 
+# Razorpay's real payloads are a few KB; anything past this is either a
+# misfire or an attempt to waste CPU/memory on JSON parsing before the
+# signature check even runs. Checked before reading the body at all.
+MAX_WEBHOOK_BODY_BYTES = 256 * 1024
+
+
 @router.post("/webhook/razorpay")
 async def razorpay_webhook(
     request: Request,
     x_razorpay_signature: str | None = Header(default=None),
+    content_length: int | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
+    if content_length is not None and content_length > MAX_WEBHOOK_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Payload too large")
+
     body = await request.body()
+    if len(body) > MAX_WEBHOOK_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Payload too large")
 
     # Fail closed, always — this endpoint mutates payment state with zero
     # other auth. A missing header used to skip verification entirely
@@ -271,7 +283,14 @@ async def razorpay_webhook(
         raise HTTPException(status_code=400, detail="Malformed webhook payload")
 
     event = data.get("event", "")
-    payload = data.get("payload", {}).get("payment", {}).get("entity", {})
+    # Different event categories nest their entity under different keys
+    # (payment.*: payload.payment.entity; order.paid: also payload.order.entity;
+    # payment.dispute.*: payload.dispute.entity + payload.payment.entity;
+    # payment.downtime.*: payload.payment.downtime.entity; invoice.*:
+    # payload.invoice.entity; payment_link.*: payload.payment_link.entity).
+    # Hand the whole payload to the dispatcher rather than pre-extracting one
+    # shape that's wrong for most of these.
+    payload = data.get("payload", {})
     try:
         await pay_svc.handle_razorpay_webhook(db, event, payload)
     except Exception:

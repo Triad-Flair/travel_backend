@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
+    # Where chargeback (payment.dispute.*) alerts go — these are time-sensitive
+    # (Razorpay gives a fixed window to submit evidence), so unlike most
+    # notifications this isn't scoped to a single agency/user.
+    platform_admin_email: str = ""
 
     # Email
     zeptomail_api_url: str = ""

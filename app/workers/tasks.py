@@ -313,6 +313,41 @@ def send_bid_alert_email_task(self, offer_id: str):
         raise self.retry(exc=exc, countdown=30)
 
 
+@celery_app.task(name="app.workers.tasks.send_dispute_alert_email", bind=True, max_retries=3)
+def send_dispute_alert_email_task(self, dispute_id: str, event: str):
+    async def _task():
+        from app.config import settings
+        from app.database import AsyncSessionLocal
+        from app.lib.email import send_dispute_alert_email
+        from app.models.payment import Dispute, Payment
+
+        if not settings.platform_admin_email:
+            logger.warning("PLATFORM_ADMIN_EMAIL not configured — dropping dispute alert for %s", dispute_id)
+            return
+
+        async with AsyncSessionLocal() as db:
+            dispute = await db.get(Dispute, dispute_id)
+            if not dispute:
+                raise LookupError(f"Dispute {dispute_id} not found (yet)")
+            payment = await db.get(Payment, dispute.payment_id)
+            if not payment:
+                return
+            await send_dispute_alert_email(
+                settings.platform_admin_email,
+                event,
+                dispute.status,
+                payment.id,
+                int(payment.amount or 0),
+                bool(payment.payout_frozen),
+            )
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_dispute_alert_email failed for dispute %s: %s", dispute_id, exc)
+        raise self.retry(exc=exc, countdown=30)
+
+
 @celery_app.task(name="app.workers.tasks.send_review_alert_email", bind=True, max_retries=3)
 def send_review_alert_email_task(self, review_id: str):
     async def _task():

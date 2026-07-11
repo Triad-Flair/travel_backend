@@ -33,6 +33,7 @@ class Payment(TimestampsMixin, BaseModel):
     paid_at: Mapped[datetime | None] = mapped_column("paidAt", DateTime(timezone=True), nullable=True)
     points_redeemed: Mapped[int] = mapped_column("pointsRedeemed", Integer, default=0, nullable=False)
     wallet_amount_used: Mapped[int] = mapped_column("walletAmountUsed", Integer, default=0, nullable=False)
+    payout_frozen: Mapped[bool] = mapped_column("payoutFrozen", Boolean, default=False, nullable=False)
 
     group = relationship("Group", back_populates="payments")
     user = relationship("User", lazy="noload")
@@ -88,4 +89,11 @@ class Dispute(TimestampsMixin, BaseModel):
     payment_id: Mapped[str] = mapped_column("paymentId", String(36), ForeignKey("payments.id"), nullable=False)
     reason: Mapped[str] = mapped_column("reason", Text, nullable=False)
     status: Mapped[str] = mapped_column("status", String(20), default="OPEN", nullable=False)
+    # CUSTOMER: filed by a traveler via /payments/disputes (create_dispute) —
+    # a support ticket, not tied to Razorpay. RAZORPAY_CHARGEBACK: created
+    # from a payment.dispute.* webhook — a real bank-initiated chargeback
+    # that can claw back settled funds. These are different concepts that
+    # happen to share a table; source is how callers tell them apart.
+    source: Mapped[str] = mapped_column("source", String(20), default="CUSTOMER", nullable=False)
+    razorpay_dispute_id: Mapped[str | None] = mapped_column("razorpayDisputeId", String(100), nullable=True)
     payment = relationship("Payment", lazy="noload")

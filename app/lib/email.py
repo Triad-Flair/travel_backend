@@ -328,6 +328,30 @@ async def send_compliance_approval_email(to: str, name: str, agency_name: str) -
     return await send_email(to, f"{agency_name} is now verified on {settings.app_name}", _shell(f"{agency_name}'s compliance verification is approved.", body))
 
 
+async def send_dispute_alert_email(
+    to: str,
+    event: str,
+    dispute_status: str,
+    payment_id: str,
+    amount_paise: int,
+    payout_frozen: bool,
+) -> bool:
+    urgency = f"""<p style="margin:12px 0 0;font-weight:700;color:#B91C1C;">Action required: submit evidence to
+        Razorpay before their deadline, or the chargeback is likely to be lost by default.</p>""" if dispute_status == "ACTION_REQUIRED" else ""
+    body = f"""
+    <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">Razorpay chargeback: {dispute_status}</h1>
+    <p style="margin:0;">Event <strong>{event}</strong> was received for payment <strong>{payment_id}</strong>.</p>
+    {_feature_list([
+        ("Payment amount", _format_inr(amount_paise)),
+        ("Dispute status", dispute_status),
+        ("Agency payouts frozen", "Yes" if payout_frozen else "No"),
+    ])}
+    {urgency}
+    {_button("Open Razorpay Dashboard", "https://dashboard.razorpay.com/app/disputes")}
+    """
+    return await send_email(to, f"[Chargeback] Payment {payment_id[:8]} — {dispute_status}", _shell(f"Chargeback {dispute_status} for payment {payment_id}.", body))
+
+
 async def send_package_expiry_warning_email(to: str, name: str, package_title: str, expires_at: str, package_url: str) -> bool:
     body = f"""
     <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">A package is expiring soon</h1>
