@@ -1,6 +1,10 @@
-from fastapi import APIRouter, Depends, Header, Query, Request
+import json
+import logging
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user
 from app.lib.razorpay_client import verify_webhook_signature
@@ -22,6 +26,7 @@ from app.services import payments as pay_svc
 from app.services import invoices as inv_svc
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/health")
@@ -243,14 +248,26 @@ async def razorpay_webhook(
     db: AsyncSession = Depends(get_db),
 ):
     body = await request.body()
-    if x_razorpay_signature and not verify_webhook_signature(body, x_razorpay_signature):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
-    import json
+    # A missing header must be rejected the same as a bad one — omitting
+    # X-Razorpay-Signature previously skipped verification entirely, letting
+    # anyone POST a forged "payment.captured" body and mark any pending
+    # payment as paid. Only relax this when no webhook secret is configured
+    # at all (local/dev before Razorpay is wired up).
+    if settings.razorpay_webhook_secret:
+        if not x_razorpay_signature or not verify_webhook_signature(body, x_razorpay_signature):
+            raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
-    data = json.loads(body)
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Malformed webhook payload")
+
     event = data.get("event", "")
     payload = data.get("payload", {}).get("payment", {}).get("entity", {})
-    await pay_svc.handle_razorpay_webhook(db, event, payload)
+    try:
+        await pay_svc.handle_razorpay_webhook(db, event, payload)
+    except Exception:
+        logger.exception("Razorpay webhook processing failed for event %s", event)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
     return {"ok": True}

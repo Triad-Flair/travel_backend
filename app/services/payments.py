@@ -659,7 +659,11 @@ async def handle_razorpay_webhook(db: AsyncSession, event: str, payload: dict) -
     if not payment:
         return
 
-    if event == "payment.captured" and payment.status != "CAPTURED":
+    # order.paid fires alongside (and sometimes ahead of) payment.captured —
+    # Razorpay includes the same payment entity in both, so treat them as
+    # equivalent triggers. The CAPTURED check makes handling either (or both,
+    # for the same payment) idempotent.
+    if event in ("payment.captured", "order.paid") and payment.status != "CAPTURED":
         payment.razorpay_payment_id = payload.get("id") or payment.razorpay_payment_id
         await _finalize_capture(db, payment)
         await db.flush()
