@@ -927,17 +927,34 @@ async def complete_trip(db: AsyncSession, group_id: str) -> dict:
         if package:
             package.status = "COMPLETED"
 
-    rows = await db.execute(select(Payment).where(Payment.group_id == group_id))
+    # Route every outstanding tranche through the same payout path the manual
+    # admin endpoint uses (execute_agency_payout) instead of flipping
+    # escrow/transfer flags directly. The old code marked tranche2 SETTLED
+    # and emailed the agency a "final settlement" notice without ever calling
+    # create_transfer or crediting AgencyWallet — harmless only because no
+    # agency has a linked Razorpay account yet, but it would tell agencies
+    # they'd been paid when no money had moved. Only CAPTURED payments are
+    # eligible; a PENDING/FAILED payment has no money to release.
+    rows = await db.execute(
+        select(Payment).where(Payment.group_id == group_id, Payment.status == "CAPTURED")
+    )
     payments = rows.scalars().all()
-    tranche2_released_now: list[Payment] = []
+    payout_failures: list[str] = []
     for payment in payments:
-        payment.escrow_status = "RELEASED"
-        payment.transfer_status = "SETTLED"
-        if not payment.tranche2_released:
-            tranche2_released_now.append(payment)
-        payment.tranche2_released = True
+        for tranche, released in (("tranche1", payment.tranche1_released), ("tranche2", payment.tranche2_released)):
+            if released:
+                continue
+            try:
+                await execute_agency_payout(db, payment.id, tranche)
+            except Exception:
+                # A payout failure (e.g. a real Route transfer rejected)
+                # must not block marking the trip itself as completed —
+                # that's a logistics fact independent of settlement status.
+                # execute_agency_payout already persists transfer_status
+                # FAILED before raising, so it's visible for admin retry via
+                # the existing idempotent /payments/agency/payout endpoint.
+                logger.exception("Trip completion payout failed for payment %s (%s)", payment.id, tranche)
+                payout_failures.append(f"{payment.id}:{tranche}")
 
     await db.flush()
-    for payment in tranche2_released_now:
-        await _send_payout_notification(db, payment, "tranche2")
-    return {"groupId": group_id, "status": "COMPLETED"}
+    return {"groupId": group_id, "status": "COMPLETED", "payoutFailures": payout_failures}
