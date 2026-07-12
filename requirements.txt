@@ -37,7 +37,13 @@ aiohttp==3.11.11
 boto3==1.35.88
 
 # Payments
-razorpay==1.4.1
+# 1.4.1's client.py does an unconditional top-level `import pkg_resources`,
+# which python:3.12-slim can't satisfy (no setuptools bundled) — every
+# Razorpay call silently failed and fell back through PaymentError into
+# mock-mode checkout with no visible error anywhere. 2.0.1 tries
+# importlib.metadata first and only touches pkg_resources in an unreachable
+# fallback branch; same order/payment/transfer/refund method signatures.
+razorpay==2.0.1
 
 # Email
 aiosmtplib==3.0.2
