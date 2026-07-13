@@ -121,11 +121,11 @@ async def test_verify_bank_account_rejects_resubmission_without_confirm_change()
     from app.services.agencies import verify_bank_account
 
     agency = _fake_agency()
-    bank = _fake_bank(verification_status="VERIFIED")
+    bank = _fake_bank(verification_status="PENDING")
     db = AsyncMock()
     db.scalar = AsyncMock(side_effect=[agency, bank])
 
-    with pytest.raises(BadRequestError, match="already verified and locked"):
+    with pytest.raises(BadRequestError, match="already on file and locked"):
         await verify_bank_account(db, "agency-1", "owner-1", {
             "accountNumber": "9999999999", "ifscCode": "ICIC0000001", "accountHolderName": "Test Agency",
         })
@@ -136,19 +136,62 @@ async def test_verify_bank_account_allows_resubmission_with_confirm_change():
     from app.services.agencies import verify_bank_account
 
     agency = _fake_agency()
-    bank = _fake_bank(verification_status="VERIFIED")
+    bank = _fake_bank(verification_status="PENDING")
     owner = SimpleNamespace(display_name="Test Owner", username="testowner")
     db = AsyncMock()
     db.scalar = AsyncMock(side_effect=[agency, bank, owner])
 
-    result = await verify_bank_account(db, "agency-1", "owner-1", {
-        "accountNumber": "9999999999", "ifscCode": "ICIC0000001", "accountHolderName": "Test Agency",
-        "branchName": "MG Road", "confirmChange": True,
-    })
+    with patch(
+        "app.services.agencies.lookup_ifsc_code",
+        new=AsyncMock(return_value={"valid": True, "bank": "ICICI Bank", "branch": "MG Road"}),
+    ), patch("app.services.agencies._sync_razorpay_linked_account", new=AsyncMock(return_value=(None, "skipped"))):
+        result = await verify_bank_account(db, "agency-1", "owner-1", {
+            "accountNumber": "9999999999", "ifscCode": "ICIC0000001", "accountHolderName": "Test Agency",
+            "branchName": "MG Road", "confirmChange": True,
+        })
 
-    assert result["verificationStatus"] == "VERIFIED"
+    # No real-time penny-drop is possible without RazorpayX — this is
+    # deliberately never VERIFIED, just an honest PENDING once the IFSC
+    # itself checks out.
+    assert result["verificationStatus"] == "PENDING"
     assert bank.ifsc_code == "ICIC0000001"
     assert bank.branch_name == "MG Road"
+
+
+@pytest.mark.asyncio
+async def test_verify_bank_account_rejects_unresolvable_ifsc():
+    from app.services.agencies import verify_bank_account
+
+    agency = _fake_agency()
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[agency, None])
+
+    with patch("app.services.agencies.lookup_ifsc_code", new=AsyncMock(return_value={"valid": False})):
+        result = await verify_bank_account(db, "agency-1", "owner-1", {
+            "accountNumber": "9999999999", "ifscCode": "ZZZZ0000001", "accountHolderName": "Test Agency",
+        })
+
+    assert result["verificationStatus"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_verify_bank_account_allows_immediate_retry_after_failed_without_confirm_change():
+    """FAILED is exempt from the lock — retrying with corrected details is
+    the entire point of that state, unlike PENDING/VERIFIED which protect an
+    already-accepted submission from being silently overwritten."""
+    from app.services.agencies import verify_bank_account
+
+    agency = _fake_agency()
+    bank = _fake_bank(verification_status="FAILED")
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[agency, bank])
+
+    with patch("app.services.agencies.lookup_ifsc_code", new=AsyncMock(return_value={"valid": False})):
+        result = await verify_bank_account(db, "agency-1", "owner-1", {
+            "accountNumber": "9999999999", "ifscCode": "ZZZZ0000001", "accountHolderName": "Test Agency",
+        })
+
+    assert result["verificationStatus"] == "FAILED"
 
 
 @pytest.mark.asyncio
@@ -160,8 +203,12 @@ async def test_verify_bank_account_persists_branch_name_on_first_submission():
     db = AsyncMock()
     db.scalar = AsyncMock(side_effect=[agency, None, owner])  # no existing bank record
 
-    await verify_bank_account(db, "agency-1", "owner-1", {
-        "accountNumber": "1234567890", "ifscCode": "HDFC0000001", "accountHolderName": "Test Agency",
+    ifsc_mock = AsyncMock(return_value={"valid": True, "bank": "HDFC Bank", "branch": "Nariman Point"})
+    with patch("app.services.agencies.lookup_ifsc_code", new=ifsc_mock), patch(
+        "app.services.agencies._sync_razorpay_linked_account", new=AsyncMock(return_value=(None, "skipped"))
+    ):
+        await verify_bank_account(db, "agency-1", "owner-1", {
+            "accountNumber": "1234567890", "ifscCode": "HDFC0000001", "accountHolderName": "Test Agency",
         "bankName": "HDFC Bank", "branchName": "Nariman Point",
     })
 

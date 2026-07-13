@@ -263,6 +263,23 @@ async def create_agency(db: AsyncSession, owner_id: str, req: CreateAgencyReques
     return _to_profile(agency)
 
 
+GSTIN_PATTERN = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
+PAN_PATTERN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]{1}$")
+
+
+def _assert_gstin_pan_valid(gstin: str | None, pan: str | None) -> None:
+    """Format-only checks — a well-formed GSTIN/PAN, not proof either is a
+    real registered number. GSTIN embeds the PAN of the entity it belongs to
+    (characters 3-12) — if both are supplied together, they must agree, or
+    one of them is simply wrong regardless of individual format validity."""
+    if gstin and not GSTIN_PATTERN.match(gstin):
+        raise BadRequestError("GSTIN format is invalid — expected a 15-character GSTIN (e.g. 29ABCDE1234F1Z5)")
+    if pan and not PAN_PATTERN.match(pan):
+        raise BadRequestError("PAN format is invalid — expected a 10-character PAN (e.g. ABCDE1234F)")
+    if gstin and pan and GSTIN_PATTERN.match(gstin) and gstin[2:12] != pan:
+        raise BadRequestError("PAN does not match the PAN embedded in the GSTIN")
+
+
 def _assert_gstin_pan_immutable(agency: Agency, gstin: str | None, pan: str | None) -> None:
     """GSTIN and PAN are collected once at signup/verification and never
     editable afterward — matches compliance expectations for documents tied
@@ -285,6 +302,7 @@ async def update_agency(
         raise ForbiddenError()
 
     _assert_gstin_pan_immutable(agency, req.gstin, req.pan)
+    _assert_gstin_pan_valid(req.gstin, req.pan)
 
     for field, value in req.model_dump(exclude_none=True).items():
         if field in ("specializations", "destinations") and isinstance(value, list):
@@ -358,7 +376,23 @@ async def submit_verification(
     if agency.owner_id != user_id:
         raise ForbiddenError("Only agency owner can submit verification")
 
-    _assert_gstin_pan_immutable(agency, payload.get("gstin"), payload.get("pan"))
+    gstin = payload.get("gstin")
+    pan = payload.get("pan")
+    _assert_gstin_pan_immutable(agency, gstin, pan)
+    _assert_gstin_pan_valid(gstin, pan)
+
+    # Verify against government GST records — only on first-time submission
+    # (immutability above already blocks changing an already-set GSTIN, so
+    # this only ever runs once per agency). If the checker itself isn't
+    # configured (no API key), don't hard-block verification submissions on
+    # an ops dependency that isn't set up yet — log it and let the admin
+    # review queue catch anything wrong manually instead.
+    if gstin and not agency.gstin:
+        gst_result = await verify_gstin(gstin)
+        if gst_result.get("error") == "GST verification not configured":
+            logger.warning("GST verification not configured — accepting GSTIN %s for %s pending manual review", gstin, agency_id)
+        elif not gst_result.get("valid"):
+            raise BadRequestError("GSTIN could not be verified against government records — check the number and try again")
 
     # This endpoint takes a raw dict (no Pydantic camelCase->snake_case
     # conversion — see the router) and the frontend sends camelCase, so any
@@ -531,12 +565,25 @@ async def _sync_razorpay_linked_account(
         return bank.razorpay_account_id, str(exc)
 
 
+ACCOUNT_NUMBER_PATTERN = re.compile(r"^[0-9]{9,18}$")
+IFSC_PATTERN = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
+
+
 async def verify_bank_account(
     db: AsyncSession,
     agency_id: str,
     user_id: str,
     payload: dict,
 ) -> dict:
+    """No penny-drop here — real Fund Account Validation (Razorpay's ₹1
+    verification product) requires RazorpayX, which this account doesn't
+    have (confirmed against the live API: "Access to requested resource not
+    available" — RazorpayX means opening an actual business current account
+    through Razorpay's banking partners, not a togglable feature). What's
+    checked instead: account number format, and that the IFSC resolves to a
+    real bank branch (Razorpay's free public IFSC lookup). Status is honest
+    about this — PENDING, never a fabricated VERIFIED with a fake 100% name
+    match, which is what this endpoint did before."""
     agency = await db.scalar(select(Agency).where(Agency.id == agency_id))
     if not agency:
         raise NotFoundError("Agency")
@@ -549,18 +596,35 @@ async def verify_bank_account(
     bank_name = str(payload.get("bankName") or "").strip() or None
     branch_name = str(payload.get("branchName") or "").strip() or None
     # Explicit intent flag — the settings UI only sends this once the owner
-    # clicks "Change bank details" on an already-verified record. Without it,
-    # a verified record can't be silently overwritten by resubmitting the form.
+    # clicks "Change bank details" on an existing record. Without it, a
+    # submitted record can't be silently overwritten by resubmitting the form.
     confirm_change = bool(payload.get("confirmChange"))
 
     if not account_number or not ifsc_code or not account_holder_name:
         raise BadRequestError("Account number, IFSC code, and account holder name are required")
+    if not ACCOUNT_NUMBER_PATTERN.match(account_number):
+        raise BadRequestError("Account number must be 9-18 digits")
+    if not IFSC_PATTERN.match(ifsc_code):
+        raise BadRequestError("IFSC code format is invalid — expected e.g. HDFC0000053")
 
     bank = await db.scalar(select(AgencyBankAccount).where(AgencyBankAccount.agency_id == agency_id))
-    if bank and bank.verification_status == "VERIFIED" and not confirm_change:
+    # FAILED is exempt from the lock — the entire point of that state is an
+    # immediate retry with corrected details, not an extra "unlock" click.
+    if bank and bank.verification_status != "FAILED" and not confirm_change:
         raise BadRequestError(
-            "Bank details are already verified and locked. Use 'Change bank details' to submit new ones."
+            "Bank details are already on file and locked. Use 'Change bank details' to submit new ones."
         )
+
+    ifsc_result = await lookup_ifsc_code(ifsc_code)
+    if not ifsc_result.get("valid"):
+        status = "FAILED"
+        message = "IFSC code does not resolve to a real bank branch — double-check it and resubmit"
+    else:
+        # Honest PENDING, not a fabricated VERIFIED — see docstring.
+        status = "PENDING"
+        message = "Bank details recorded. Full verification requires manual review until real-time account validation is available."
+        bank_name = bank_name or ifsc_result.get("bank")
+        branch_name = branch_name or ifsc_result.get("branch")
 
     if not bank:
         bank = AgencyBankAccount(
@@ -571,7 +635,7 @@ async def verify_bank_account(
             account_holder_name=account_holder_name,
             bank_name=bank_name,
             branch_name=branch_name,
-            verification_status="VERIFIED",
+            verification_status=status,
         )
         db.add(bank)
     else:
@@ -580,22 +644,26 @@ async def verify_bank_account(
         bank.account_holder_name = account_holder_name
         bank.bank_name = bank_name
         bank.branch_name = branch_name
-        bank.verification_status = "VERIFIED"
+        bank.verification_status = status
 
     await db.flush()
 
-    # Every verified (or re-verified) submission re-syncs the Razorpay Route
-    # linked account — first-time creates it, later calls just refresh the
-    # settlement bank details on the existing account (see
-    # configure_route_settlement's idempotency note).
-    owner = await db.scalar(select(User).where(User.id == agency.owner_id))
-    contact_name = (owner.display_name or owner.username) if owner else None
-    if not contact_name:
-        razorpay_account_id, route_sync_message = bank.razorpay_account_id, "Missing agency owner contact name"
-    else:
-        razorpay_account_id, route_sync_message = await _sync_razorpay_linked_account(agency, bank, contact_name)
-    bank.razorpay_account_id = razorpay_account_id
-    await db.flush()
+    razorpay_account_id, route_sync_message = bank.razorpay_account_id, "IFSC could not be verified — Razorpay sync skipped"
+    if status == "PENDING":
+        # Route sync still proceeds at PENDING (not gated on real KYC, which
+        # isn't available here) — first-time creates the linked account,
+        # later calls just refresh settlement details on the existing one
+        # (see configure_route_settlement's idempotency note). A bogus IFSC
+        # would just fail the same Razorpay call anyway, so there's no
+        # point trying once the lookup above has already rejected it.
+        owner = await db.scalar(select(User).where(User.id == agency.owner_id))
+        contact_name = (owner.display_name or owner.username) if owner else None
+        if not contact_name:
+            razorpay_account_id, route_sync_message = bank.razorpay_account_id, "Missing agency owner contact name"
+        else:
+            razorpay_account_id, route_sync_message = await _sync_razorpay_linked_account(agency, bank, contact_name)
+        bank.razorpay_account_id = razorpay_account_id
+        await db.flush()
 
     return {
         "id": bank.id,
@@ -605,11 +673,11 @@ async def verify_bank_account(
         "maskedAccountNumber": _mask_account(bank.account_number_encrypted),
         "ifscCode": bank.ifsc_code,
         "razorpayAccountId": bank.razorpay_account_id,
-        "verificationStatus": "VERIFIED",
-        "nameMatchScore": 100,
-        "nameMatchPassed": True,
-        "verifiedAt": datetime.now(UTC).isoformat(),
+        "verificationStatus": status,
+        "nameMatchScore": None,
+        "nameMatchPassed": None,
+        "verifiedAt": None,
         "retryCount": 0,
-        "message": "Bank account verified successfully",
+        "message": message,
         "routeSyncStatus": route_sync_message,
     }
