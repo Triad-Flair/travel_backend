@@ -42,7 +42,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="2.0.0",
-        description="TripSync Travel Marketplace API — FastAPI",
+        description=f"{settings.app_name} Travel Marketplace API — FastAPI",
         docs_url="/docs" if not settings.is_production else None,
         redoc_url="/redoc" if not settings.is_production else None,
         lifespan=lifespan,

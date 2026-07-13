@@ -8,7 +8,10 @@ class PlatformInfo(CamelModel):
     gstin: str
     email: str
     website: str
-    cin: str
+    # LLPIN, not CIN — Triad Flair IT Solutions LLP is an LLP, which is
+    # registered with an LLP Identification Number, not a Company
+    # Identification Number (that's only for Pvt Ltd/Ltd entities).
+    llpin: str
     support_email: str
     support_phone: str | None = None
 

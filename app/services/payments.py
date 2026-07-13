@@ -100,7 +100,7 @@ def _payment_to_response(payment: Payment) -> PaymentRecordResponse:
 
 
 async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> None:
-    invoice = await inv_svc._ensure_invoice(db, payment)
+    invoice = await inv_svc.ensure_invoice_pdfs(db, payment)
     ctx = await inv_svc._trip_context(db, payment)
     trip = ctx["plan"] or ctx["package"]
     agency = ctx["agency"]
@@ -108,7 +108,9 @@ async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> Non
     traveler = await db.scalar(select(User).where(User.id == payment.user_id))
     if traveler and traveler.email and trip:
         # PRD trigger: send_transactional_invoice_email — routed through
-        # Celery (see app/workers/tasks.py) rather than a direct await.
+        # Celery (see app/workers/tasks.py) rather than a direct await. The
+        # task re-runs ensure_invoice_pdfs itself (idempotent) rather than
+        # trusting this transaction has committed by the time it executes.
         from app.workers.tasks import send_transactional_invoice_email_task
         send_transactional_invoice_email_task.delay(payment.id)
 
@@ -123,6 +125,7 @@ async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> Non
                 trip.title,
                 f"{settings.frontend_url}/agency/invoices/{payment.id}",
                 int(payment.amount or 0),
+                pdf_bytes=invoice.agency_pdf_data,
             )
 
 

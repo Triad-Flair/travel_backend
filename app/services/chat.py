@@ -6,6 +6,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.config import settings
 from app.core.cache import CacheKeys, TTL_SHORT, get_cached, invalidate, set_cached
 from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.chat import (
@@ -85,7 +86,7 @@ async def _notify_if_repeated_leakage_attempts(db: AsyncSession, user_id: str) -
             type="compliance_reminder",
             title="Keep communication on-platform",
             body=(
-                "For your security, keep all communication, payments, and bookings on TripSync. "
+                f"For your security, keep all communication, payments, and bookings on {settings.app_name}. "
                 "We've hidden some contact details you tried to share — this keeps you covered by our "
                 "trust and safety guarantees."
             ),

@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>{{ invoice_number }}</title>
+  <style>
+    :root {
+      --ink: #142126;
+      --muted: #5f6b70;
+      --green: #0a9b51;
+      --green-dark: #06773d;
+      --green-soft: #f0f8f4;
+      --line: #d7dfe2;
+      --surface: #ffffff;
+      --page: #eef2f3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .invoice { width: 100%; padding: 10mm 13mm 8mm; background: var(--surface); }
+    .company-header { display: flex; align-items: flex-start; gap: 14px; padding-bottom: 12px; border-bottom: 2px solid var(--green); }
+    .brand-mark { flex: 0 0 55px; width: 55px; height: 55px; object-fit: contain; }
+    .company-name { margin: -3px 0 2px; font-size: 24px; line-height: 1.05; font-weight: 800; letter-spacing: -0.5px; }
+    .company-meta { margin: 2px 0 0; color: var(--ink); font-size: 11.5px; }
+    .company-meta strong { font-weight: 750; }
+    .top-grid { display: table; width: 100%; table-layout: fixed; margin-top: 16px; }
+    .top-grid-cell { display: table-cell; vertical-align: top; }
+    .left-stack { width: 58%; padding-right: 24px; }
+    .details-card + .details-card { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .section-heading { margin: 0 0 10px; font-size: 13px; font-weight: 800; letter-spacing: 0.1px; text-transform: uppercase; border-left: 4px solid var(--green); padding-left: 8px; }
+    .detail-row { margin-bottom: 5px; }
+    .detail-label { font-weight: 700; display: inline-block; min-width: 130px; margin-right: 6px; }
+    .invoice-summary { width: 42%; padding-left: 24px; border-left: 1px solid var(--line); }
+    .invoice-title { margin: -4px 0 20px; font-size: 18px; font-weight: 850; letter-spacing: -0.5px; }
+    .marketplace { margin-bottom: 16px; }
+    .marketplace strong { display: block; font-size: 14px; }
+    .marketplace span { font-size: 11px; color: var(--muted); }
+    .summary-row { margin-bottom: 10px; font-size: 12.5px; }
+    .summary-row dt { font-weight: 800; display: inline; }
+    .summary-row dd { margin: 0; display: inline; }
+    .financial-section { margin-top: 18px; }
+    table.line-items { width: 100%; border-collapse: collapse; }
+    table.line-items col.sno { width: 6%; }
+    table.line-items col.description { width: 40%; }
+    table.line-items col.base { width: 15%; }
+    table.line-items col.rate { width: 13%; }
+    table.line-items col.total { width: 13%; }
+    thead th { padding: 10px 8px; background: var(--ink); color: #fff; font-size: 10.5px; font-weight: 800; text-align: left; }
+    tbody td, tfoot td { padding: 8px 8px; vertical-align: middle; border-top: 1px solid var(--line); font-size: 12px; }
+    .center { text-align: center; }
+    .number { text-align: right; white-space: nowrap; }
+    .description-primary { display: block; font-weight: 650; }
+    .description-secondary { display: block; margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+    .discount-row td { padding: 10px; background: var(--green-soft); color: #21322a; text-align: center; font-size: 11.5px; }
+    tfoot td { background: #fbfcfc; font-weight: 800; }
+    .total-card { display: table; width: 100%; margin: 14px 0 0; padding: 10px 16px; border: 2px solid var(--green); border-radius: 10px; }
+    .total-card-cell { display: table-cell; vertical-align: middle; }
+    .total-label { margin: 0; font-size: 11.5px; font-weight: 850; }
+    .amount-words { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .grand-total { text-align: right; color: var(--green-dark); font-size: 22px; font-weight: 900; white-space: nowrap; }
+    .compliance { margin-top: 16px; }
+    .legal-list { margin: 0; padding-left: 20px; color: #273438; font-size: 10.2px; line-height: 1.4; }
+    .legal-list li { margin-bottom: 6px; }
+    .legal-list strong { color: var(--ink); }
+    .signature { text-align: right; margin-top: 20px; font-size: 12px; font-weight: 800; }
+    @page { size: A4; margin: 0; }
+  </style>
+</head>
+<body>
+  <main class="invoice">
+    <header class="company-header">
+      <img class="brand-mark" src="{{ logo_data_uri }}" alt="{{ platform.name }}" />
+      <div>
+        <h1 class="company-name">{{ platform.name }}</h1>
+        <p class="company-meta"><strong>Registered Office:</strong> {{ platform.address }}</p>
+        <p class="company-meta">
+          <strong>Email:</strong> {{ platform.email }}
+          &nbsp;|&nbsp;
+          <strong>GSTIN:</strong> {{ platform.gstin }}
+          &nbsp;|&nbsp;
+          <strong>LLPIN:</strong> {{ platform.llpin }}
+        </p>
+      </div>
+    </header>
+
+    {% block content %}{% endblock %}
+
+    <section class="compliance">
+      <h2 class="section-heading">Compliance Notes &amp; Legal Declarations</h2>
+      <ol class="legal-list">
+        <li>
+          <strong>Marketplace Facilitation:</strong>
+          {{ platform.website }} is an online technology aggregation platform owned and
+          operated by {{ platform.name }}. The contract for travel execution
+          is bound between the traveler and the designated verified local agency{% if agency_name %} ({{ agency_name }}){% endif %}.
+        </li>
+        <li>
+          <strong>Escrow Milestone Protections:</strong>
+          Funds allocated to the operating agency are held securely until release
+          milestones are cleared sequentially based on real-time trip coordination.
+        </li>
+        <li>
+          <strong>Tax Compliance:</strong>
+          GST is collected under SAC 998311 by {{ platform.name }}. The
+          underlying tour operations compliance remains the tax liability of the
+          operating travel operator under SAC 998551.
+        </li>
+      </ol>
+      <div class="signature">For {{ platform.name }}</div>
+    </section>
+  </main>
+</body>
+</html>

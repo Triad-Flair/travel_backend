@@ -45,6 +45,11 @@ boto3==1.35.88
 # fallback branch; same order/payment/transfer/refund method signatures.
 razorpay==2.0.1
 
+# Invoice PDF generation — renders the same HTML/CSS invoice template used
+# on-screen; needs libpango/libcairo/libgdk-pixbuf system libraries (see
+# Dockerfile) which aren't part of python:3.12-slim by default.
+weasyprint==69.0
+
 # Email
 aiosmtplib==3.0.2
 jinja2==3.1.4

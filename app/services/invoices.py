@@ -1,9 +1,11 @@
+import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.lib.pdf import render_agency_settlement_pdf, render_user_invoice_pdf
 from app.models.agency import Agency
 from app.models.group import Group, GroupMember
 from app.models.offer import Offer
@@ -12,6 +14,8 @@ from app.models.payment import Invoice, Payment
 from app.models.plan import Plan
 from app.models.user import User
 from app.exceptions import ForbiddenError, NotFoundError
+
+logger = logging.getLogger(__name__)
 from app.schemas.invoices import (
     AgencySettlementResponse,
     InvoiceAgencyInfo,
@@ -31,15 +35,15 @@ from app.schemas.invoices import (
 )
 
 PLATFORM_INFO = {
-    "name": "TripSync",
+    "name": "Triad Flair IT Solutions LLP",
     "tagline": "India's Social Travel Platform",
-    "address": "TripSync Pvt. Ltd., Bengaluru, Karnataka — 560001",
-    "gstin": "29AABCT1234R1Z5",
-    "email": "billing@tripsync.in",
-    "website": "https://www.tripsync.in",
-    "cin": "U63090KA2024PTC000001",
-    "supportEmail": "support@tripsync.in",
-    "supportPhone": "+91 80 4567 8900",
+    "address": "H65, Sector 63, Noida, Uttar Pradesh 201301",
+    "gstin": "09ABAFT1926H1Z6",
+    "email": "connect@triadflair.com",
+    "website": "https://travellersin.com",
+    "llpin": "ACY-7379",
+    "supportEmail": "connect@triadflair.com",
+    "supportPhone": None,
 }
 
 REFUND_POLICY = [
@@ -52,7 +56,7 @@ REFUND_POLICY = [
 
 TERMS = [
     "Funds are held in escrow until trip milestones are completed.",
-    "TripSync acts as an intermediary platform between traveler and agency.",
+    f"{PLATFORM_INFO['name']} acts as an intermediary platform between traveler and agency.",
     "Cancellation refunds depend on selected package/offer policy.",
     "This invoice is system generated and valid without signature.",
 ]
@@ -283,6 +287,13 @@ async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesti
         raise ForbiddenError("Access denied")
 
     invoice = await _ensure_invoice(db, payment)
+    return await _build_user_invoice_data(db, payment, invoice)
+
+
+async def _build_user_invoice_data(db: AsyncSession, payment: Payment, invoice: Invoice) -> UserInvoiceResponse:
+    """Split from build_user_invoice_payload so the payment-capture flow
+    (which has no "requesting user" — it's a system-triggered PDF render,
+    not a GET request) can build the same payload without the access check."""
     traveler = await db.scalar(select(User).where(User.id == payment.user_id))
     ctx = await _trip_context(db, payment)
 
@@ -316,7 +327,7 @@ async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesti
             InvoiceDiscountLine(label=f"Loyalty Points Redeemed ({points_redeemed} pts × ₹1)", amount=-points_discount)
         )
     if wallet_amount_used > 0:
-        discount_lines.append(InvoiceDiscountLine(label="TripSync Wallet Credit Applied", amount=-wallet_discount))
+        discount_lines.append(InvoiceDiscountLine(label="Wallet Credit Applied", amount=-wallet_discount))
 
     return UserInvoiceResponse(
         invoice_number=invoice.invoice_number,
@@ -362,7 +373,7 @@ async def build_user_invoice_payload(db: AsyncSession, payment_id: str, requesti
                 subtotal=trip_amount,
             ),
             InvoiceLineItem(
-                description="TripSync Platform Fee (GST extra)",
+                description="Platform Fee (GST extra)",
                 subtext="Platform service fee",
                 qty=1,
                 unit="fixed",
@@ -405,6 +416,18 @@ async def build_agency_settlement_payload(db: AsyncSession, payment_id: str, req
     if agency.owner_id != requesting_user_id:
         raise ForbiddenError("Access denied")
 
+    return await _build_agency_settlement_data(db, payment, invoice, ctx)
+
+
+async def _build_agency_settlement_data(db: AsyncSession, payment: Payment, invoice: Invoice, ctx: dict | None = None) -> AgencySettlementResponse:
+    """Split from build_agency_settlement_payload — see _build_user_invoice_data
+    for why (system-triggered PDF render, no requesting user to check)."""
+    if ctx is None:
+        ctx = await _trip_context(db, payment)
+    agency = ctx["agency"]
+    if not agency:
+        raise NotFoundError("Agency")
+
     traveler = await db.scalar(select(User).where(User.id == payment.user_id))
     plan = ctx["plan"]
     package = ctx["package"]
@@ -427,15 +450,7 @@ async def build_agency_settlement_payload(db: AsyncSession, payment_id: str, req
         issued_at=_iso(payment.paid_at or invoice.created_at),
         status=payment.escrow_status,
         transfer_status=payment.transfer_status or "MANUAL",
-        platform=PlatformInfo(
-            name=PLATFORM_INFO["name"],
-            address=PLATFORM_INFO["address"],
-            gstin=PLATFORM_INFO["gstin"],
-            email=PLATFORM_INFO["email"],
-            website=PLATFORM_INFO["website"],
-            cin=PLATFORM_INFO["cin"],
-            support_email=PLATFORM_INFO["supportEmail"],
-        ),
+        platform=PlatformInfo(**PLATFORM_INFO),
         agency=InvoiceAgencyInfo(
             name=agency.name,
             gstin=agency.gstin or "Pending",
@@ -493,3 +508,64 @@ async def build_agency_settlement_payload(db: AsyncSession, payment_id: str, req
         members=member_names,
         terms_and_conditions=TERMS,
     )
+
+
+async def ensure_invoice_pdfs(db: AsyncSession, payment: Payment) -> Invoice:
+    """Called once at payment capture — generates and stores both PDFs
+    (idempotent: skips whichever blob is already populated, so calling this
+    again after a partial failure only fills the gap, and repeat capture-
+    notification retries don't re-render for nothing). A PDF failure must
+    never block the payment capture flow itself, so every render is
+    isolated in its own try/except and just leaves that blob unset on error
+    — list_user_invoices/list_agency_invoices calling this again later
+    (e.g. the traveler opening their invoice tab) gets another chance."""
+    invoice = await _ensure_invoice(db, payment)
+    generated_any = False
+
+    if invoice.user_pdf_data is None:
+        try:
+            user_payload = await _build_user_invoice_data(db, payment, invoice)
+            invoice.user_pdf_data = render_user_invoice_pdf(user_payload)
+            generated_any = True
+        except Exception:
+            logger.exception("User invoice PDF generation failed for payment %s", payment.id)
+
+    if invoice.agency_pdf_data is None:
+        try:
+            ctx = await _trip_context(db, payment)
+            if ctx["agency"]:
+                agency_payload = await _build_agency_settlement_data(db, payment, invoice, ctx)
+                invoice.agency_pdf_data = render_agency_settlement_pdf(agency_payload)
+                generated_any = True
+        except Exception:
+            logger.exception("Agency settlement PDF generation failed for payment %s", payment.id)
+
+    if generated_any:
+        invoice.pdf_generated_at = datetime.now(UTC)
+        await db.flush()
+
+    return invoice
+
+
+async def get_user_invoice_pdf(db: AsyncSession, payment_id: str, requesting_user_id: str) -> tuple[bytes, str]:
+    payment = await _resolve_payment(db, payment_id)
+    if payment.user_id != requesting_user_id:
+        raise ForbiddenError("Access denied")
+    invoice = await ensure_invoice_pdfs(db, payment)
+    if not invoice.user_pdf_data:
+        raise NotFoundError("Invoice PDF (generation failed — try again shortly)")
+    return invoice.user_pdf_data, invoice.invoice_number
+
+
+async def get_agency_settlement_pdf(db: AsyncSession, payment_id: str, requesting_user_id: str) -> tuple[bytes, str]:
+    payment = await _resolve_payment(db, payment_id)
+    ctx = await _trip_context(db, payment)
+    agency = ctx["agency"]
+    if not agency:
+        raise NotFoundError("Agency")
+    if agency.owner_id != requesting_user_id:
+        raise ForbiddenError("Access denied")
+    invoice = await ensure_invoice_pdfs(db, payment)
+    if not invoice.agency_pdf_data:
+        raise NotFoundError("Settlement PDF (generation failed — try again shortly)")
+    return invoice.agency_pdf_data, invoice.invoice_number.replace("TSU", "TSA")

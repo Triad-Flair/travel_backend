@@ -1,0 +1,96 @@
+{% extends "_base.html" %}
+{% block content %}
+    <section class="top-grid">
+      <div class="top-grid-cell left-stack">
+        <article class="details-card">
+          <h2 class="section-heading">Bill To (Traveler Details)</h2>
+          <div class="detail-row"><span class="detail-label">Name:</span><span>{{ traveler.name }}</span></div>
+          <div class="detail-row"><span class="detail-label">Email:</span><span>{{ traveler.email }}</span></div>
+          {% if traveler.phone %}<div class="detail-row"><span class="detail-label">Mobile:</span><span>{{ traveler.phone }}</span></div>{% endif %}
+          {% if traveler.city %}<div class="detail-row"><span class="detail-label">City:</span><span>{{ traveler.city }}</span></div>{% endif %}
+        </article>
+
+        {% if agency %}
+        <article class="details-card">
+          <h2 class="section-heading">Fulfillment Partner Details</h2>
+          <div class="detail-row"><span class="detail-label">Operating Agency:</span><span>{{ agency.name }}</span></div>
+          {% if agency.gstin %}<div class="detail-row"><span class="detail-label">Agency GSTIN:</span><span>{{ agency.gstin }}</span></div>{% endif %}
+          {% if agency.address %}<div class="detail-row"><span class="detail-label">Address:</span><span>{{ agency.address }}</span></div>{% endif %}
+        </article>
+        {% endif %}
+      </div>
+
+      <aside class="top-grid-cell invoice-summary">
+        <h2 class="invoice-title">TAX INVOICE / RECEIPT</h2>
+        <div class="marketplace"><strong>{{ platform.website }}</strong><span>Marketplace Platform</span></div>
+        <dl>
+          <div class="summary-row"><dt>Invoice No:</dt> <dd>{{ invoice_number }}</dd></div>
+          <div class="summary-row"><dt>Invoice Date:</dt> <dd>{{ issued_at }}</dd></div>
+          <div class="summary-row"><dt>Status:</dt> <dd>{{ status }}</dd></div>
+        </dl>
+      </aside>
+    </section>
+
+    <section class="financial-section">
+      <h2 class="section-heading">Trip: {{ trip.title }} &mdash; {{ trip.destination }}</h2>
+      <p style="margin: 0 0 14px; font-size: 11.5px; color: var(--muted);">
+        {{ trip.start_date or "TBD" }} &rarr; {{ trip.end_date or "TBD" }} &middot; {{ trip.traveler_count }} traveler(s)
+      </p>
+
+      <h2 class="section-heading">Financial Itemization &amp; Tax Breakdown</h2>
+      <table class="line-items">
+        <colgroup>
+          <col class="sno" /><col class="description" /><col class="base" /><col class="rate" /><col class="total" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th class="center">S.No</th>
+            <th>Description</th>
+            <th class="number">Rate (INR)</th>
+            <th class="center">Qty</th>
+            <th class="number">Subtotal (INR)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in line_items %}
+          <tr>
+            <td class="center">{{ "%02d"|format(loop.index) }}.</td>
+            <td>
+              <span class="description-primary">{{ item.description }}</span>
+              {% if item.subtext %}<span class="description-secondary">{{ item.subtext }}</span>{% endif %}
+            </td>
+            <td class="number">{{ item.rate_inr }}</td>
+            <td class="center">{{ item.qty }} {{ item.unit }}</td>
+            <td class="number">{{ item.subtotal_inr }}</td>
+          </tr>
+          {% endfor %}
+          {% for line in discount_lines %}
+          <tr class="discount-row">
+            <td colspan="5">
+              <strong>{{ line.label }}:</strong> &minus;{{ line.amount_inr }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="4" class="center">GRAND TOTAL PAID</td>
+            <td class="number">{{ grand_total_inr }}</td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <div class="total-card">
+        <div class="total-card-cell" style="width: 65%;">
+          <p class="total-label">NET AMOUNT PAID BY TRAVELER (INR)</p>
+          <p class="amount-words">Includes trip cost, platform fee, and applicable GST — less any points/wallet credit applied.</p>
+        </div>
+        <div class="total-card-cell grand-total">&#8377;{{ grand_total_inr }}</div>
+      </div>
+    </section>
+
+    <section class="financial-section">
+      <h2 class="section-heading">Cancellation &amp; Refund Policy</h2>
+      <p style="font-size: 11.5px; margin: 0 0 8px;">{{ trip.cancellation_policy }}</p>
+    </section>
+{% endblock %}

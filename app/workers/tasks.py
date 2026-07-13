@@ -259,7 +259,11 @@ def send_transactional_invoice_email_task(self, payment_id: str):
                 raise LookupError(f"User {payment.user_id} not found (yet)")
             if not traveler.email:
                 return
-            invoice = await inv_svc._ensure_invoice(db, payment)
+            # Idempotent — re-running this after the inline call in
+            # _send_capture_notifications either finds both PDFs already
+            # generated (no-op) or fills the gap if that transaction hadn't
+            # committed yet when this task started.
+            invoice = await inv_svc.ensure_invoice_pdfs(db, payment)
             ctx = await inv_svc._trip_context(db, payment)
             trip = ctx["plan"] or ctx["package"]
             if not trip:
@@ -271,6 +275,7 @@ def send_transactional_invoice_email_task(self, payment_id: str):
                 trip.title,
                 f"{settings.frontend_url}/dashboard/invoices/{payment.id}",
                 int(payment.amount or 0),
+                pdf_bytes=invoice.user_pdf_data,
             )
             await db.commit()
 

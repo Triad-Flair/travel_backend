@@ -149,7 +149,7 @@ async def smtp_test_email(
 
     sent = await send_email(
         to=to,
-        subject="[TripSync] SMTP Test Email",
+        subject=f"[{settings.app_name}] SMTP Test Email",
         html=(
             "<p>SMTP is working.</p>"
             f"<p>Host: <strong>{settings.smtp_host}</strong></p>"

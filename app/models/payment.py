@@ -1,7 +1,7 @@
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Boolean, DateTime, Integer, String, Text
+from sqlalchemy import ForeignKey, Boolean, DateTime, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, TimestampsMixin
@@ -57,6 +57,15 @@ class Invoice(TimestampsMixin, BaseModel):
     currency: Mapped[str] = mapped_column("currency", String(3), default="INR", nullable=False)
     status: Mapped[str] = mapped_column("status", String(20), default="PENDING", nullable=False)
     pdf_url: Mapped[str | None] = mapped_column("pdfUrl", Text, nullable=True)
+    # Generated PDFs stored directly in Postgres (bytea) rather than object
+    # storage — no S3/Supabase Storage credentials are configured, and these
+    # are small per-invoice documents, not bulk media. Two separate blobs
+    # because the user-payment and agency-settlement invoices are genuinely
+    # different documents with different audiences (see schemas/invoices.py
+    # — the settlement one carries commission data the user one must never see).
+    user_pdf_data: Mapped[bytes | None] = mapped_column("userPdfData", LargeBinary, nullable=True)
+    agency_pdf_data: Mapped[bytes | None] = mapped_column("agencyPdfData", LargeBinary, nullable=True)
+    pdf_generated_at: Mapped[datetime | None] = mapped_column("pdfGeneratedAt", DateTime(timezone=True), nullable=True)
 
     payment = relationship("Payment", back_populates="invoice")
 

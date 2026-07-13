@@ -1,5 +1,7 @@
+import base64
 import logging
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -108,14 +110,38 @@ border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(26,26,46,0.08);">
 </html>"""
 
 
-async def send_email(to: str, subject: str, html: str) -> bool:
+class EmailAttachment(NamedTuple):
+    filename: str
+    content: bytes
+    mime_type: str = "application/pdf"
+
+
+async def send_email(to: str, subject: str, html: str, attachments: list[EmailAttachment] | None = None) -> bool:
     if settings.zeptomail_api_key:
-        return await _send_via_zeptomail(to, subject, html)
-    return await _send_via_smtp(to, subject, html)
+        return await _send_via_zeptomail(to, subject, html, attachments)
+    return await _send_via_smtp(to, subject, html, attachments)
 
 
-async def _send_via_zeptomail(to: str, subject: str, html: str) -> bool:
+async def _send_via_zeptomail(to: str, subject: str, html: str, attachments: list[EmailAttachment] | None = None) -> bool:
     try:
+        payload = {
+            "from": {
+                "address": settings.zeptomail_from_address,
+                "name": settings.zeptomail_from_name,
+            },
+            "to": [{"email_address": {"address": to}}],
+            "subject": subject,
+            "htmlbody": html,
+        }
+        if attachments:
+            payload["attachments"] = [
+                {
+                    "content": base64.b64encode(a.content).decode(),
+                    "mime_type": a.mime_type,
+                    "name": a.filename,
+                }
+                for a in attachments
+            ]
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 settings.zeptomail_api_url,
@@ -123,15 +149,7 @@ async def _send_via_zeptomail(to: str, subject: str, html: str) -> bool:
                     "Authorization": settings.zeptomail_api_key,
                     "Content-Type": "application/json",
                 },
-                json={
-                    "from": {
-                        "address": settings.zeptomail_from_address,
-                        "name": settings.zeptomail_from_name,
-                    },
-                    "to": [{"email_address": {"address": to}}],
-                    "subject": subject,
-                    "htmlbody": html,
-                },
+                json=payload,
                 timeout=10,
             )
             resp.raise_for_status()
@@ -141,17 +159,26 @@ async def _send_via_zeptomail(to: str, subject: str, html: str) -> bool:
         return False
 
 
-async def _send_via_smtp(to: str, subject: str, html: str) -> bool:
+async def _send_via_smtp(to: str, subject: str, html: str, attachments: list[EmailAttachment] | None = None) -> bool:
     try:
         import aiosmtplib
+        from email.mime.application import MIMEApplication
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
-        msg = MIMEMultipart("alternative")
+        # multipart/mixed only when there's actually a file to attach —
+        # multipart/alternative alone (no attachments) is the pre-existing,
+        # already-working shape for a body with no plain-text counterpart.
+        msg = MIMEMultipart("mixed") if attachments else MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = f"{settings.zeptomail_from_name} <{settings.smtp_user}>"
         msg["To"] = to
         msg.attach(MIMEText(html, "html"))
+
+        for attachment in attachments or []:
+            part = MIMEApplication(attachment.content, _subtype=attachment.mime_type.split("/")[-1])
+            part.add_header("Content-Disposition", "attachment", filename=attachment.filename)
+            msg.attach(part)
 
         await aiosmtplib.send(
             msg,
@@ -235,6 +262,7 @@ async def send_payment_receipt_email(
     trip_title: str,
     invoice_url: str,
     total_amount_paise: int,
+    pdf_bytes: bytes | None = None,
 ) -> bool:
     body = f"""
     <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">Payment confirmed</h1>
@@ -245,7 +273,8 @@ async def send_payment_receipt_email(
     ])}
     {_button("View invoice", invoice_url)}
     """
-    return await send_email(to, f"Payment confirmed for {trip_title}", _shell(f"Your payment for {trip_title} is confirmed.", body))
+    attachments = [EmailAttachment(f"{invoice_number}.pdf", pdf_bytes)] if pdf_bytes else None
+    return await send_email(to, f"Payment confirmed for {trip_title}", _shell(f"Your payment for {trip_title} is confirmed.", body), attachments)
 
 
 async def send_agency_booking_invoice_email(
@@ -256,6 +285,7 @@ async def send_agency_booking_invoice_email(
     trip_title: str,
     settlement_url: str,
     total_amount_paise: int,
+    pdf_bytes: bytes | None = None,
 ) -> bool:
     body = f"""
     <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">New traveler payment captured</h1>
@@ -267,7 +297,8 @@ async def send_agency_booking_invoice_email(
     ])}
     {_button("View settlement", settlement_url)}
     """
-    return await send_email(to, f"New payment captured for {trip_title}", _shell(f"A new payment was captured for {trip_title}.", body))
+    attachments = [EmailAttachment(f"{invoice_number}.pdf", pdf_bytes)] if pdf_bytes else None
+    return await send_email(to, f"New payment captured for {trip_title}", _shell(f"A new payment was captured for {trip_title}.", body), attachments)
 
 
 async def send_agency_payout_update_email(

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -7,6 +7,14 @@ from app.schemas.invoices import AgencySettlementResponse, UserInvoiceResponse
 from app.services import invoices as inv_svc
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
+
+
+def _pdf_response(pdf_bytes: bytes, invoice_number: str) -> Response:
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{invoice_number}.pdf"'},
+    )
 
 
 @router.get("/me")
@@ -33,6 +41,26 @@ async def agency_settlement_detail(
     db: AsyncSession = Depends(get_db),
 ):
     return await inv_svc.build_agency_settlement_payload(db, payment_id, current_user.user_id)
+
+
+@router.get("/agency/settlement/{payment_id}/pdf")
+async def agency_settlement_pdf(
+    payment_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    pdf_bytes, invoice_number = await inv_svc.get_agency_settlement_pdf(db, payment_id, current_user.user_id)
+    return _pdf_response(pdf_bytes, invoice_number)
+
+
+@router.get("/{payment_id}/pdf")
+async def user_invoice_pdf(
+    payment_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    pdf_bytes, invoice_number = await inv_svc.get_user_invoice_pdf(db, payment_id, current_user.user_id)
+    return _pdf_response(pdf_bytes, invoice_number)
 
 
 @router.get("/{payment_id}", response_model=UserInvoiceResponse)

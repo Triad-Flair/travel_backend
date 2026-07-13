@@ -3,9 +3,18 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install system dependencies
+# libpango/libcairo/libgdk-pixbuf/fonts-* are for WeasyPrint (invoice PDF
+# generation) — not needed by anything else in this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    shared-mime-info \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
