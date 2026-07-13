@@ -18,6 +18,8 @@ def _fake_agency(**overrides):
         gstin=None, pan=None, name="Test Agency", description=None,
         city=None, state=None, address=None, postal_code=None, phone=None, email=None,
         tourism_license=None, logo_url=None, specializations=None, destinations=None,
+        verification_status="pending", verification_rejection_reason=None,
+        avg_rating=0.0, review_count=0, total_trips=0,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -80,6 +82,26 @@ async def test_submit_verification_rejects_pan_change():
 
     with pytest.raises(BadRequestError, match="PAN cannot be changed"):
         await submit_verification(db, "agency-1", "owner-1", {"pan": "ZZZZZ9999Z"})
+
+
+@pytest.mark.asyncio
+async def test_submit_verification_accepts_camel_case_postal_code_and_tourism_license():
+    """The router passes the raw JSON dict straight through with no
+    camelCase->snake_case conversion — the frontend sends postalCode/
+    tourismLicense, so the service must accept both spellings rather than
+    only ever matching the snake_case form nothing actually sends."""
+    from app.services.agencies import submit_verification
+
+    agency = _fake_agency()
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=agency)
+
+    await submit_verification(db, "agency-1", "owner-1", {
+        "postalCode": "560001", "tourismLicense": "TL-12345",
+    })
+
+    assert agency.postal_code == "560001"
+    assert agency.tourism_license == "TL-12345"
 
 
 # ── Rule 2: verified bank details locked without confirmChange ─────────────

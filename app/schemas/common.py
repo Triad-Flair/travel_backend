@@ -48,6 +48,7 @@ class AgencySummary(CamelModel):
     pan: str | None = None
     tourism_license: str | None = None
     address: str | None = None
+    postal_code: str | None = None
     phone: str | None = None
     email: str | None = None
     city: str | None = None

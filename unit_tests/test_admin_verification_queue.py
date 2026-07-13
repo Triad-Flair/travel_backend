@@ -10,7 +10,7 @@ def _fake_agency(**overrides):
     defaults = dict(
         id="agency-1", name="Test Agency", slug="test-agency", logo_url=None, description=None,
         verification_status="under_review", verification_rejection_reason=None,
-        gstin="07AAICS1234A1Z9", pan="AAICS1234A", tourism_license=None, address=None,
+        gstin="07AAICS1234A1Z9", pan="AAICS1234A", tourism_license=None, address=None, postal_code=None,
         phone=None, email=None, city=None, state=None, specializations=None, destinations=None,
         avg_rating=0.0, review_count=0, total_trips=0,
     )

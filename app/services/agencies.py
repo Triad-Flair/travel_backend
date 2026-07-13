@@ -67,6 +67,7 @@ def _agency_to_summary(agency: Agency) -> AgencySummary:
         pan=agency.pan,
         tourism_license=agency.tourism_license,
         address=agency.address,
+        postal_code=agency.postal_code,
         phone=agency.phone,
         email=agency.email,
         city=agency.city,
@@ -359,19 +360,27 @@ async def submit_verification(
 
     _assert_gstin_pan_immutable(agency, payload.get("gstin"), payload.get("pan"))
 
+    # This endpoint takes a raw dict (no Pydantic camelCase->snake_case
+    # conversion — see the router) and the frontend sends camelCase, so any
+    # multi-word field name needs both spellings checked explicitly; single-
+    # word fields are spelling-invariant and don't need this.
+    camel_aliases = {"tourism_license": "tourismLicense", "postal_code": "postalCode"}
+
     for field in (
         "gstin",
         "pan",
         "tourism_license",
         "address",
+        "postal_code",
         "city",
         "state",
         "phone",
         "email",
         "description",
     ):
-        if field in payload and payload[field] is not None and hasattr(agency, field):
-            setattr(agency, field, payload[field])
+        value = payload.get(field, payload.get(camel_aliases.get(field, field)))
+        if value is not None and hasattr(agency, field):
+            setattr(agency, field, value)
 
     agency.verification_status = "under_review"
     agency.verification_rejection_reason = None

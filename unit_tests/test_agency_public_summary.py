@@ -53,6 +53,7 @@ def _fake_agency(**overrides):
         pan="AAICS1234A",
         tourism_license=None,
         address=None,
+        postal_code=None,
         phone=None,
         email=None,
         city=None,
