@@ -553,6 +553,46 @@ async def verify_payment(db: AsyncSession, req: VerifyPaymentRequest, user_id: s
     return _payment_to_response(payment)
 
 
+async def handle_hosted_checkout_callback(
+    db: AsyncSession,
+    razorpay_order_id: str | None,
+    razorpay_payment_id: str | None,
+    razorpay_signature: str | None,
+) -> str:
+    """Razorpay's hosted checkout page (form-POST redirect flow, not the JS
+    overlay) sends the browser back here via a server-side POST with no auth
+    session attached — the HMAC signature is the only trust boundary, same
+    as the webhook. Always returns a redirect target; never raises, since
+    there's no request originator left to show an error response to."""
+    fallback_url = f"{settings.frontend_url}/dashboard/trips"
+
+    if not razorpay_order_id or not razorpay_payment_id or not razorpay_signature:
+        logger.warning("Hosted checkout callback missing required fields")
+        return f"{fallback_url}?payment=failed"
+
+    payment = await db.scalar(select(Payment).where(Payment.razorpay_order_id == razorpay_order_id))
+    if not payment:
+        logger.warning("Hosted checkout callback for unknown order_id=%s", razorpay_order_id)
+        return f"{fallback_url}?payment=failed"
+
+    checkout_url = f"{settings.frontend_url}/dashboard/groups/{payment.group_id}/checkout"
+
+    if payment.status == "CAPTURED":
+        # Idempotent — the webhook and this callback both fire for the same
+        # payment, in no guaranteed order.
+        return f"{checkout_url}?payment=success"
+
+    if not verify_signature(razorpay_order_id, razorpay_payment_id, razorpay_signature):
+        logger.error("Hosted checkout callback signature mismatch for payment %s", payment.id)
+        return f"{checkout_url}?payment=failed"
+
+    payment.razorpay_payment_id = razorpay_payment_id
+    await _finalize_capture(db, payment)
+    await db.flush()
+
+    return f"{checkout_url}?payment=success"
+
+
 async def mock_capture(db: AsyncSession, req: MockCaptureRequest, user_id: str) -> PaymentRecordResponse:
     payment = await db.scalar(select(Payment).where(Payment.id == req.payment_id))
     if not payment:

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import uuid
 from datetime import UTC, datetime
@@ -9,12 +10,15 @@ from sqlalchemy import Text, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.core.cache import CacheKeys, TTL_MEDIUM, get_cached, invalidate, set_cached
-from app.exceptions import BadRequestError, ForbiddenError, NotFoundError
+from app.exceptions import BadRequestError, ForbiddenError, NotFoundError, PaymentError
 from app.lib.gst import verify_gstin
 from app.lib.ifsc import lookup_ifsc as lookup_ifsc_code
+from app.lib.razorpay_route import configure_route_settlement, create_linked_account
 from app.models.agency import Agency, AgencyBankAccount, AgencyMember, AgencyWallet
 from app.models.social import Review
+from app.models.user import User
 from app.schemas.agencies import (
     AgencyProfile,
     CreateAgencyRequest,
@@ -23,6 +27,8 @@ from app.schemas.agencies import (
     UpdateAgencyRequest,
 )
 from app.schemas.common import AgencyPublicSummary, AgencySummary
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_json_list(raw: object) -> list | None:
@@ -109,6 +115,7 @@ def _to_profile(agency: Agency) -> AgencyProfile:
         city=agency.city,
         state=agency.state,
         address=agency.address,
+        postal_code=agency.postal_code,
         gstin=agency.gstin,
         pan=agency.pan,
         tourism_license=agency.tourism_license,
@@ -238,6 +245,7 @@ async def create_agency(db: AsyncSession, owner_id: str, req: CreateAgencyReques
         city=req.city,
         state=req.state,
         address=req.address,
+        postal_code=req.postal_code,
         phone=req.phone,
         email=req.email,
         gstin=req.gstin,
@@ -450,6 +458,70 @@ async def get_bank_record(db: AsyncSession, agency_id: str, user_id: str) -> dic
     }
 
 
+async def _sync_razorpay_linked_account(
+    agency: Agency, bank: AgencyBankAccount, contact_name: str
+) -> tuple[str | None, str]:
+    """Best-effort — bank verification must succeed in our system regardless
+    of whether this does. Returns (razorpay_account_id_to_persist, status_message).
+    Never raises: PaymentError from the Razorpay calls is caught here so a
+    Razorpay-side failure can't block recording the agency's own bank details.
+
+    contact_name must be an actual person's name (letters/spaces only) — confirmed
+    empirically that Razorpay rejects business-style names ("... Pvt Ltd", anything
+    with digits) with "contact name format is invalid". bank.account_holder_name is
+    the wrong source for this: on Indian business bank accounts it's routinely the
+    company name, not a person — the caller passes the agency owner's name instead.
+    """
+    if not (settings.razorpay_key_id and settings.razorpay_key_secret):
+        return bank.razorpay_account_id, "Razorpay is not configured"
+
+    required = {
+        "email": agency.email, "phone": agency.phone, "address": agency.address,
+        "city": agency.city, "state": agency.state, "postal_code": agency.postal_code,
+    }
+    missing = [field for field, value in required.items() if not value]
+    if missing:
+        logger.warning("Skipping Razorpay Route sync for agency %s — missing %s", agency.id, ", ".join(missing))
+        return bank.razorpay_account_id, f"Add {', '.join(missing)} to your agency profile to enable automated payouts"
+
+    try:
+        account_id = bank.razorpay_account_id
+        if not account_id:
+            account = await create_linked_account(
+                email=agency.email,
+                phone=agency.phone,
+                legal_business_name=agency.name,
+                contact_name=contact_name,
+                # Razorpay caps reference_id at 20 chars (confirmed empirically:
+                # "The code may not be greater than 20 characters") — our ids are
+                # 36-char UUIDs, so this is a lookup hint for Razorpay's side only,
+                # not a full round-trippable key; razorpay_account_id is what we
+                # actually key off on our end.
+                reference_id=agency.id[:20],
+                street1=agency.address,
+                # Our schema only has one free-text address field; Razorpay
+                # requires street2 non-empty (confirmed empirically — an
+                # empty string is rejected), so reuse the city rather than
+                # fabricate content that isn't true of the agency.
+                street2=agency.city,
+                city=agency.city,
+                state=agency.state,
+                postal_code=agency.postal_code,
+            )
+            account_id = account["id"]
+
+        await configure_route_settlement(
+            account_id,
+            account_number=bank.account_number_encrypted,
+            ifsc_code=bank.ifsc_code or "",
+            beneficiary_name=bank.account_holder_name,
+        )
+        return account_id, "Synced with Razorpay Route"
+    except PaymentError as exc:
+        logger.error("Razorpay Route sync failed for agency %s: %s", agency.id, exc)
+        return bank.razorpay_account_id, str(exc)
+
+
 async def verify_bank_account(
     db: AsyncSession,
     agency_id: str,
@@ -467,10 +539,6 @@ async def verify_bank_account(
     account_holder_name = str(payload.get("accountHolderName") or "").strip()
     bank_name = str(payload.get("bankName") or "").strip() or None
     branch_name = str(payload.get("branchName") or "").strip() or None
-    # Razorpay Route linked account id (e.g. "acc_...") — set once the agency
-    # has been onboarded through Razorpay's own Linked Account/KYC flow,
-    # which is separate from (and not built as part of) this endpoint.
-    razorpay_account_id = str(payload.get("razorpayAccountId") or "").strip() or None
     # Explicit intent flag — the settings UI only sends this once the owner
     # clicks "Change bank details" on an already-verified record. Without it,
     # a verified record can't be silently overwritten by resubmitting the form.
@@ -494,7 +562,6 @@ async def verify_bank_account(
             account_holder_name=account_holder_name,
             bank_name=bank_name,
             branch_name=branch_name,
-            razorpay_account_id=razorpay_account_id,
             verification_status="VERIFIED",
         )
         db.add(bank)
@@ -504,10 +571,21 @@ async def verify_bank_account(
         bank.account_holder_name = account_holder_name
         bank.bank_name = bank_name
         bank.branch_name = branch_name
-        if razorpay_account_id:
-            bank.razorpay_account_id = razorpay_account_id
         bank.verification_status = "VERIFIED"
 
+    await db.flush()
+
+    # Every verified (or re-verified) submission re-syncs the Razorpay Route
+    # linked account — first-time creates it, later calls just refresh the
+    # settlement bank details on the existing account (see
+    # configure_route_settlement's idempotency note).
+    owner = await db.scalar(select(User).where(User.id == agency.owner_id))
+    contact_name = (owner.display_name or owner.username) if owner else None
+    if not contact_name:
+        razorpay_account_id, route_sync_message = bank.razorpay_account_id, "Missing agency owner contact name"
+    else:
+        razorpay_account_id, route_sync_message = await _sync_razorpay_linked_account(agency, bank, contact_name)
+    bank.razorpay_account_id = razorpay_account_id
     await db.flush()
 
     return {
@@ -524,4 +602,5 @@ async def verify_bank_account(
         "verifiedAt": datetime.now(UTC).isoformat(),
         "retryCount": 0,
         "message": "Bank account verified successfully",
+        "routeSyncStatus": route_sync_message,
     }

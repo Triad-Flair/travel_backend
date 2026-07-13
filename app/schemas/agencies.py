@@ -14,6 +14,7 @@ class AgencyProfile(CamelModel):
     city: str | None = None
     state: str | None = None
     address: str | None = None
+    postal_code: str | None = None
     gstin: str | None = None
     pan: str | None = None
     tourism_license: str | None = None
@@ -33,6 +34,7 @@ class CreateAgencyRequest(CamelModel):
     city: str | None = None
     state: str | None = None
     address: str | None = None
+    postal_code: str | None = None
     phone: str | None = None
     email: str | None = None
     gstin: str | None = None
@@ -49,6 +51,7 @@ class UpdateAgencyRequest(CamelModel):
     city: str | None = None
     state: str | None = None
     address: str | None = None
+    postal_code: str | None = None
     phone: str | None = None
     email: str | None = None
     gstin: str | None = None

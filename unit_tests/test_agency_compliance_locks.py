@@ -16,7 +16,7 @@ def _fake_agency(**overrides):
     defaults = dict(
         id="agency-1", owner_id="owner-1", slug="test-agency",
         gstin=None, pan=None, name="Test Agency", description=None,
-        city=None, state=None, address=None, phone=None, email=None,
+        city=None, state=None, address=None, postal_code=None, phone=None, email=None,
         tourism_license=None, logo_url=None, specializations=None, destinations=None,
     )
     defaults.update(overrides)
@@ -115,8 +115,9 @@ async def test_verify_bank_account_allows_resubmission_with_confirm_change():
 
     agency = _fake_agency()
     bank = _fake_bank(verification_status="VERIFIED")
+    owner = SimpleNamespace(display_name="Test Owner", username="testowner")
     db = AsyncMock()
-    db.scalar = AsyncMock(side_effect=[agency, bank])
+    db.scalar = AsyncMock(side_effect=[agency, bank, owner])
 
     result = await verify_bank_account(db, "agency-1", "owner-1", {
         "accountNumber": "9999999999", "ifscCode": "ICIC0000001", "accountHolderName": "Test Agency",
@@ -133,8 +134,9 @@ async def test_verify_bank_account_persists_branch_name_on_first_submission():
     from app.services.agencies import verify_bank_account
 
     agency = _fake_agency()
+    owner = SimpleNamespace(display_name="Test Owner", username="testowner")
     db = AsyncMock()
-    db.scalar = AsyncMock(side_effect=[agency, None])  # no existing bank record
+    db.scalar = AsyncMock(side_effect=[agency, None, owner])  # no existing bank record
 
     await verify_bank_account(db, "agency-1", "owner-1", {
         "accountNumber": "1234567890", "ifscCode": "HDFC0000001", "accountHolderName": "Test Agency",

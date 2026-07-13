@@ -23,6 +23,7 @@ class Agency(TimestampsMixin, BaseModel):
     address: Mapped[str | None] = mapped_column("address", Text, nullable=True)
     city: Mapped[str | None] = mapped_column("city", String(100), nullable=True)
     state: Mapped[str | None] = mapped_column("state", String(100), nullable=True)
+    postal_code: Mapped[str | None] = mapped_column("postalCode", String(10), nullable=True)
     phone: Mapped[str | None] = mapped_column("phone", String(20), nullable=True)
     email: Mapped[str | None] = mapped_column("email", String(255), nullable=True)
     specializations: Mapped[list | dict | None] = mapped_column("specializations", JSONB, nullable=True)

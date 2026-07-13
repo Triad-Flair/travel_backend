@@ -2,6 +2,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -98,6 +99,27 @@ async def verify_payment(
     db: AsyncSession = Depends(get_db),
 ):
     return await pay_svc.verify_payment(db, req, current_user.user_id)
+
+
+@router.post("/razorpay-callback")
+async def razorpay_hosted_checkout_callback(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    # Razorpay's hosted checkout page (full-page redirect, not the JS
+    # overlay) POSTs the browser here as a plain form submit — no JWT, no
+    # JSON body, and no request originator left to hand an error response
+    # to. The signature is the only trust boundary; deliberately no auth
+    # dependency here (same posture as /webhook/razorpay).
+    form = await request.form()
+    redirect_url = await pay_svc.handle_hosted_checkout_callback(
+        db,
+        form.get("razorpay_order_id"),
+        form.get("razorpay_payment_id"),
+        form.get("razorpay_signature"),
+    )
+    # 303: browser must GET the redirect target, not replay the POST.
+    return RedirectResponse(url=redirect_url, status_code=303)
 
 
 @router.post("/mock-capture", response_model=PaymentRecordResponse)
