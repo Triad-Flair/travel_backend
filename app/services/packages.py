@@ -348,6 +348,12 @@ async def update_package(
                 setattr(pkg, db_field, value)
 
     await db.flush()
+    # pkg.updated_at has onupdate=func.now() — SQLAlchemy marks it expired
+    # after this UPDATE rather than eagerly re-fetching it, and a bare
+    # synchronous re-read of an expired attribute crashes under the asyncio
+    # extension (MissingGreenlet). An explicit awaited refresh avoids that —
+    # see the identical comment in services/offers.py::counter_offer.
+    await db.refresh(pkg)
     await invalidate(CacheKeys.package_detail(pkg.slug))
     return _pkg_to_details(pkg)
 
@@ -363,6 +369,8 @@ async def publish_package(db: AsyncSession, pkg_id: str, agency_id: str) -> Pack
         raise ForbiddenError()
     pkg.status = "OPEN"
     await db.flush()
+    # See the onupdate=func.now() / MissingGreenlet comment in update_package.
+    await db.refresh(pkg)
     await invalidate(CacheKeys.package_detail(pkg.slug))
     await invalidate_pattern("discover:*")
     return _pkg_to_details(pkg)

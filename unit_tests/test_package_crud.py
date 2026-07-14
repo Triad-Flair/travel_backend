@@ -8,6 +8,17 @@ AttributeError: 'NoneType' object has no attribute 'id'.
 Also fixed in the same pass: create_package/update_package silently dropped
 start_date/end_date entirely — the request schema carries them as ISO
 strings but the Package(...) constructor never read them.
+
+A second, separate live 500 followed on publish: pkg.status = "OPEN" then
+db.flush() marks pkg.updated_at (onupdate=func.now()) expired, and a bare
+synchronous re-read of an expired attribute in _pkg_to_details crashes with
+sqlalchemy.exc.MissingGreenlet outside an async context. Same class of bug
+already fixed once in services/offers.py::counter_offer — publish_package/
+update_package just hadn't been given the same db.refresh(pkg) call. A
+plain db.refresh(pkg) is safe here (doesn't re-blank the noload agency
+relationship) because Session.refresh() reloads relationship attributes
+using whatever eager strategy they were originally loaded with — and both
+functions load pkg via selectinload(Package.agency) up front.
 """
 from datetime import datetime
 from types import SimpleNamespace
@@ -16,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.schemas.packages import CreatePackageRequest, UpdatePackageRequest
-from app.services.packages import create_package, update_package
+from app.services.packages import create_package, publish_package, update_package
 
 
 def _fake_agency(**overrides):
@@ -128,3 +139,45 @@ async def test_update_package_parses_start_and_end_dates():
 
     assert pkg.start_date == datetime.fromisoformat("2026-08-01T00:00:00.000Z")
     assert pkg.end_date == datetime.fromisoformat("2026-08-10T00:00:00.000Z")
+
+
+@pytest.mark.asyncio
+async def test_update_package_refreshes_pkg_after_flush_to_avoid_expired_attribute_crash():
+    """Regression test for the live 500 on the same class of bug the
+    publish_package test below covers — a bare access of pkg.updated_at
+    after flush (onupdate=func.now()) crashes with MissingGreenlet unless
+    explicitly refreshed first."""
+    pkg = _fake_package()
+    db = AsyncMock()
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none = MagicMock(return_value=pkg)
+    db.execute = AsyncMock(return_value=execute_result)
+    db.flush = AsyncMock()
+    db.refresh = AsyncMock()
+
+    with patch("app.services.packages.invalidate", new=AsyncMock()):
+        await update_package(db, "pkg-1", "agency-1", UpdatePackageRequest(title="New Title"))
+
+    db.refresh.assert_awaited_once_with(pkg)
+
+
+@pytest.mark.asyncio
+async def test_publish_package_refreshes_pkg_after_flush_to_avoid_expired_attribute_crash():
+    """Regression test for the live 500 on POST /packages/{id}/publish:
+    sqlalchemy.exc.MissingGreenlet from reading pkg.updated_at (expired by
+    the onupdate=func.now() column after flush) outside an async context."""
+    pkg = _fake_package(status="DRAFT")
+    db = AsyncMock()
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none = MagicMock(return_value=pkg)
+    db.execute = AsyncMock(return_value=execute_result)
+    db.flush = AsyncMock()
+    db.refresh = AsyncMock()
+
+    with patch("app.services.packages.invalidate", new=AsyncMock()), \
+         patch("app.services.packages.invalidate_pattern", new=AsyncMock()):
+        details = await publish_package(db, "pkg-1", "agency-1")
+
+    db.refresh.assert_awaited_once_with(pkg)
+    assert details.status == "OPEN"
+    assert pkg.status == "OPEN"
