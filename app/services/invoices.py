@@ -317,11 +317,16 @@ async def _build_user_invoice_data(db: AsyncSession, payment: Payment, invoice: 
 
     points_discount = points_redeemed * 100
     wallet_discount = wallet_amount_used * 100
-    total_discounts = points_discount + wallet_discount
+    promo_discount = int(payment.promo_discount_amount or 0)
+    total_discounts = points_discount + wallet_discount + promo_discount
     grand_total = int(payment.amount)
 
     per_person_rate = int(trip_amount / traveler_count) if traveler_count > 0 else trip_amount
     discount_lines = []
+    if payment.promo_code and promo_discount > 0:
+        discount_lines.append(
+            InvoiceDiscountLine(label=f"Coupon Applied ({payment.promo_code})", amount=-promo_discount)
+        )
     if points_redeemed > 0:
         discount_lines.append(
             InvoiceDiscountLine(label=f"Loyalty Points Redeemed ({points_redeemed} pts × ₹1)", amount=-points_discount)

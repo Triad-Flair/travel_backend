@@ -34,6 +34,8 @@ class Payment(TimestampsMixin, BaseModel):
     points_redeemed: Mapped[int] = mapped_column("pointsRedeemed", Integer, default=0, nullable=False)
     wallet_amount_used: Mapped[int] = mapped_column("walletAmountUsed", Integer, default=0, nullable=False)
     payout_frozen: Mapped[bool] = mapped_column("payoutFrozen", Boolean, default=False, nullable=False)
+    promo_code: Mapped[str | None] = mapped_column("promoCode", String(50), nullable=True)
+    promo_discount_amount: Mapped[int] = mapped_column("promoDiscountAmount", Integer, default=0, nullable=False)
 
     group = relationship("Group", back_populates="payments")
     user = relationship("User", lazy="noload")
@@ -75,6 +77,16 @@ class PromotionalDiscount(TimestampsMixin, BaseModel):
     __table_args__ = {"extend_existing": True}
     code: Mapped[str] = mapped_column("code", String(50), nullable=False, unique=True)
     is_active: Mapped[bool] = mapped_column("isActive", Boolean, default=True, nullable=False)
+    description: Mapped[str | None] = mapped_column("description", String(255), nullable=True)
+    discount_type: Mapped[str] = mapped_column(
+        "discountType", String(20), nullable=False, default="PERCENTAGE"
+    )
+    discount_value: Mapped[int] = mapped_column("discountValue", Integer, nullable=False, default=0)
+    max_discount_paise: Mapped[int | None] = mapped_column("maxDiscountPaise", Integer, nullable=True)
+    min_order_amount_paise: Mapped[int | None] = mapped_column("minOrderAmountPaise", Integer, nullable=True)
+    usage_limit: Mapped[int | None] = mapped_column("usageLimit", Integer, nullable=True)
+    per_user_limit: Mapped[int | None] = mapped_column("perUserLimit", Integer, nullable=True, default=1)
+    expires_at: Mapped[datetime | None] = mapped_column("expiresAt", DateTime(timezone=True), nullable=True)
 
 
 class PromoCodeUsage(TimestampsMixin, BaseModel):

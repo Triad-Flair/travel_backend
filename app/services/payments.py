@@ -17,7 +17,7 @@ from app.models.group import Group, GroupMember
 from app.models.loyalty import LoyaltyPointsLedger, ReferralWallet
 from app.models.offer import Offer
 from app.models.package import Package
-from app.models.payment import Dispute, Payment
+from app.models.payment import Dispute, Payment, PromoCodeUsage, PromotionalDiscount
 from app.models.plan import Plan
 from app.models.user import User
 from app.schemas.payments import (
@@ -28,8 +28,10 @@ from app.schemas.payments import (
     DisputeResponse,
     GroupPaymentOrderResponse,
     GroupPaymentStateResponse,
+    CreatePromoCodeRequest,
     MockCaptureRequest,
     PaymentRecordResponse,
+    PromoCodeResponse,
     ValidatePromoRequest,
     ValidatePromoResponse,
     VerifyPaymentRequest,
@@ -90,6 +92,8 @@ def _payment_to_response(payment: Payment) -> PaymentRecordResponse:
         payout_frozen=bool(payment.payout_frozen),
         points_redeemed=int(payment.points_redeemed or 0),
         wallet_amount_used=int(payment.wallet_amount_used or 0),
+        promo_code=payment.promo_code,
+        promo_discount_amount=int(payment.promo_discount_amount or 0),
         trip_amount=int(payment.trip_amount or 0),
         platform_fee_amount=int(payment.platform_fee_amount or 0),
         fee_gst_amount=int(payment.fee_gst_amount or 0),
@@ -266,6 +270,22 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
     payment.status = "CAPTURED"
     payment.paid_at = datetime.now(UTC)
 
+    if payment.promo_code:
+        promo = await db.scalar(
+            select(PromotionalDiscount).where(
+                func.upper(PromotionalDiscount.code) == payment.promo_code.upper()
+            )
+        )
+        if promo:
+            db.add(
+                PromoCodeUsage(
+                    id=str(uuid.uuid4()),
+                    promo_id=promo.id,
+                    user_id=payment.user_id,
+                    payment_id=payment.id,
+                )
+            )
+
     member = await db.scalar(
         select(GroupMember).where(
             GroupMember.group_id == payment.group_id,
@@ -439,7 +459,15 @@ async def create_payment_order(
     points_discount = points * 100
     wallet_discount = wallet_rupees * 100
     gross_amount = int(ctx["breakdown"]["totalAmount"])
-    final_amount = max(100, gross_amount - points_discount - wallet_discount)
+
+    promo_code = (req.promo_code or "").strip().upper() or None
+    promo_discount = 0
+    if promo_code:
+        promo, promo_discount, _ = await _resolve_promo_discount(db, promo_code, user_id, gross_amount)
+        if not promo:
+            promo_code = None
+
+    final_amount = max(100, gross_amount - points_discount - wallet_discount - promo_discount)
 
     checkout_mode = "razorpay" if settings.razorpay_key_id and settings.razorpay_key_secret else "mock"
 
@@ -448,6 +476,8 @@ async def create_payment_order(
         payment.amount = final_amount
         payment.points_redeemed = points
         payment.wallet_amount_used = wallet_rupees
+        payment.promo_code = promo_code
+        payment.promo_discount_amount = promo_discount
         payment.trip_amount = int(ctx["breakdown"]["tripAmount"])
         payment.platform_fee_amount = int(ctx["breakdown"]["platformFeeAmount"])
         payment.fee_gst_amount = int(ctx["breakdown"]["feeGstAmount"])
@@ -472,6 +502,8 @@ async def create_payment_order(
             source=ctx["payment_source"],
             points_redeemed=points,
             wallet_amount_used=wallet_rupees,
+            promo_code=promo_code,
+            promo_discount_amount=promo_discount,
         )
         db.add(payment)
 
@@ -497,6 +529,8 @@ async def create_payment_order(
     breakdown["pointsDiscount"] = points_discount
     breakdown["walletAmountUsed"] = wallet_rupees
     breakdown["walletDiscount"] = wallet_discount
+    breakdown["promoCode"] = promo_code
+    breakdown["promoDiscount"] = promo_discount
 
     return GroupPaymentOrderResponse(
         payment=_payment_to_response(payment),
@@ -510,18 +544,153 @@ async def create_payment_order(
     )
 
 
+async def _resolve_promo_discount(
+    db: AsyncSession, code: str, user_id: str, gross_amount: int
+) -> tuple[PromotionalDiscount | None, int, str]:
+    """Look up a promo code and compute its discount against gross_amount (paise).
+
+    Returns (promo, discount_paise, message) — promo is None (discount 0) for
+    any code that doesn't apply, with message explaining why.
+    """
+    normalized = (code or "").strip().upper()
+    if not normalized:
+        return None, 0, "Enter a promo code"
+
+    promo = await db.scalar(
+        select(PromotionalDiscount).where(func.upper(PromotionalDiscount.code) == normalized)
+    )
+    if not promo or not promo.is_active:
+        return None, 0, "Invalid promo code"
+
+    if promo.expires_at and promo.expires_at <= datetime.now(UTC):
+        return None, 0, "This promo code has expired"
+
+    if promo.min_order_amount_paise and gross_amount < promo.min_order_amount_paise:
+        return None, 0, f"Minimum order amount for this code is ₹{promo.min_order_amount_paise // 100}"
+
+    if promo.usage_limit is not None:
+        total_uses = await db.scalar(
+            select(func.count(PromoCodeUsage.id)).where(PromoCodeUsage.promo_id == promo.id)
+        ) or 0
+        if int(total_uses) >= promo.usage_limit:
+            return None, 0, "This promo code has reached its usage limit"
+
+    if promo.per_user_limit is not None:
+        user_uses = await db.scalar(
+            select(func.count(PromoCodeUsage.id)).where(
+                PromoCodeUsage.promo_id == promo.id,
+                PromoCodeUsage.user_id == user_id,
+            )
+        ) or 0
+        if int(user_uses) >= promo.per_user_limit:
+            return None, 0, "You have already used this promo code"
+
+    if promo.discount_type == "PERCENTAGE":
+        discount = int(gross_amount * promo.discount_value / 100)
+    else:
+        discount = int(promo.discount_value)
+
+    if promo.max_discount_paise is not None:
+        discount = min(discount, promo.max_discount_paise)
+    discount = max(0, min(discount, gross_amount))
+
+    return promo, discount, "Promo code applied"
+
+
 async def validate_promo(
     db: AsyncSession,
     req: ValidatePromoRequest,
     user_id: str,
 ) -> ValidatePromoResponse:
+    ctx = await _get_payment_context(db, req.group_id, user_id)
+    gross_amount = int(ctx["breakdown"]["totalAmount"])
+    promo, discount_paise, message = await _resolve_promo_discount(db, req.code, user_id, gross_amount)
+    if not promo:
+        return ValidatePromoResponse(
+            valid=False,
+            discount_type=None,
+            discount_value=None,
+            discount_paise=None,
+            message=message,
+        )
     return ValidatePromoResponse(
-        valid=False,
-        discount_type=None,
-        discount_value=None,
-        discount_paise=None,
-        message="Promo validation is currently unavailable",
+        valid=True,
+        discount_type=promo.discount_type,
+        discount_value=int(promo.discount_value),
+        discount_paise=discount_paise,
+        message=message,
     )
+
+
+async def _promo_to_response(db: AsyncSession, promo: PromotionalDiscount) -> PromoCodeResponse:
+    times_used = await db.scalar(
+        select(func.count(PromoCodeUsage.id)).where(PromoCodeUsage.promo_id == promo.id)
+    ) or 0
+    return PromoCodeResponse(
+        id=promo.id,
+        code=promo.code,
+        is_active=bool(promo.is_active),
+        description=promo.description,
+        discount_type=promo.discount_type,
+        discount_value=int(promo.discount_value),
+        max_discount_paise=promo.max_discount_paise,
+        min_order_amount_paise=promo.min_order_amount_paise,
+        usage_limit=promo.usage_limit,
+        per_user_limit=promo.per_user_limit,
+        expires_at=promo.expires_at,
+        times_used=int(times_used),
+        created_at=promo.created_at,
+    )
+
+
+async def create_promo_code(db: AsyncSession, req: CreatePromoCodeRequest) -> PromoCodeResponse:
+    code = req.code.strip().upper()
+    if not code:
+        raise BadRequestError("Promo code is required")
+    if req.discount_type not in {"PERCENTAGE", "FLAT"}:
+        raise BadRequestError("discountType must be PERCENTAGE or FLAT")
+    if req.discount_value <= 0:
+        raise BadRequestError("discountValue must be greater than 0")
+    if req.discount_type == "PERCENTAGE" and req.discount_value > 100:
+        raise BadRequestError("A percentage discount cannot exceed 100")
+
+    existing = await db.scalar(
+        select(PromotionalDiscount).where(func.upper(PromotionalDiscount.code) == code)
+    )
+    if existing:
+        raise BadRequestError(f"Promo code '{code}' already exists")
+
+    promo = PromotionalDiscount(
+        id=str(uuid.uuid4()),
+        code=code,
+        is_active=True,
+        description=req.description,
+        discount_type=req.discount_type,
+        discount_value=req.discount_value,
+        max_discount_paise=req.max_discount_paise,
+        min_order_amount_paise=req.min_order_amount_paise,
+        usage_limit=req.usage_limit,
+        per_user_limit=req.per_user_limit,
+        expires_at=req.expires_at,
+    )
+    db.add(promo)
+    await db.flush()
+    return await _promo_to_response(db, promo)
+
+
+async def list_promo_codes(db: AsyncSession) -> list[PromoCodeResponse]:
+    rows = await db.execute(select(PromotionalDiscount).order_by(PromotionalDiscount.created_at.desc()))
+    promos = rows.scalars().all()
+    return [await _promo_to_response(db, promo) for promo in promos]
+
+
+async def set_promo_code_active(db: AsyncSession, promo_id: str, is_active: bool) -> PromoCodeResponse:
+    promo = await db.scalar(select(PromotionalDiscount).where(PromotionalDiscount.id == promo_id))
+    if not promo:
+        raise NotFoundError("Promo code")
+    promo.is_active = is_active
+    await db.flush()
+    return await _promo_to_response(db, promo)
 
 
 async def verify_payment(db: AsyncSession, req: VerifyPaymentRequest, user_id: str) -> PaymentRecordResponse:

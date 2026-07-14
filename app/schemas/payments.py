@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.schemas.base import CamelModel
 
 
@@ -31,6 +33,34 @@ class ValidatePromoResponse(CamelModel):
     message: str
 
 
+class CreatePromoCodeRequest(CamelModel):
+    code: str
+    discount_type: str
+    discount_value: int
+    description: str | None = None
+    max_discount_paise: int | None = None
+    min_order_amount_paise: int | None = None
+    usage_limit: int | None = None
+    per_user_limit: int | None = 1
+    expires_at: datetime | None = None
+
+
+class PromoCodeResponse(CamelModel):
+    id: str
+    code: str
+    is_active: bool
+    description: str | None
+    discount_type: str
+    discount_value: int
+    max_discount_paise: int | None
+    min_order_amount_paise: int | None
+    usage_limit: int | None
+    per_user_limit: int | None
+    expires_at: datetime | None
+    times_used: int
+    created_at: datetime
+
+
 class PaymentRecordResponse(CamelModel):
     id: str
     user_id: str
@@ -46,6 +76,8 @@ class PaymentRecordResponse(CamelModel):
     payout_frozen: bool = False
     points_redeemed: int = 0
     wallet_amount_used: int | str = 0
+    promo_code: str | None = None
+    promo_discount_amount: int = 0
     trip_amount: int | None = None
     platform_fee_amount: int | None = None
     fee_gst_amount: int | None = None

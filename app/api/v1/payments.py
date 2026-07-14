@@ -14,11 +14,13 @@ from app.schemas.payments import (
     AgencyWalletTransaction,
     CreateDisputeRequest,
     CreateOrderRequest,
+    CreatePromoCodeRequest,
     DisputeResponse,
     GroupPaymentOrderResponse,
     GroupPaymentStateResponse,
     MockCaptureRequest,
     PaymentRecordResponse,
+    PromoCodeResponse,
     ValidatePromoRequest,
     ValidatePromoResponse,
     VerifyPaymentRequest,
@@ -90,6 +92,45 @@ async def validate_promo(
     db: AsyncSession = Depends(get_db),
 ):
     return await pay_svc.validate_promo(db, req, current_user.user_id)
+
+
+@router.get("/admin/promo-codes", response_model=list[PromoCodeResponse])
+async def admin_list_promo_codes(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await pay_svc.list_promo_codes(db)
+
+
+@router.post("/admin/promo-codes", response_model=PromoCodeResponse, status_code=201)
+async def admin_create_promo_code(
+    req: CreatePromoCodeRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await pay_svc.create_promo_code(db, req)
+
+
+@router.post("/admin/promo-codes/{promo_id}/deactivate", response_model=PromoCodeResponse)
+async def admin_deactivate_promo_code(
+    promo_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await pay_svc.set_promo_code_active(db, promo_id, is_active=False)
+
+
+@router.post("/admin/promo-codes/{promo_id}/activate", response_model=PromoCodeResponse)
+async def admin_activate_promo_code(
+    promo_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await pay_svc.set_promo_code_active(db, promo_id, is_active=True)
 
 
 @router.post("/verify", response_model=PaymentRecordResponse)
