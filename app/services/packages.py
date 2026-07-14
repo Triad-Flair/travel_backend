@@ -288,6 +288,8 @@ async def create_package(db: AsyncSession, agency_id: str, req: CreatePackageReq
         slug=slug,
         destination=req.destination,
         destination_state=req.destination_state,
+        start_date=datetime.fromisoformat(req.start_date) if req.start_date else None,
+        end_date=datetime.fromisoformat(req.end_date) if req.end_date else None,
         price_per_person=req.base_price,
         group_size_min=req.group_size_min,
         group_size_max=req.group_size_max,
@@ -306,7 +308,14 @@ async def create_package(db: AsyncSession, agency_id: str, req: CreatePackageReq
     )
     db.add(pkg)
     await db.flush()
-    await db.refresh(pkg, ["agency"])
+    # Package.agency is lazy="noload" — db.refresh(pkg, ["agency"]) is a
+    # documented no-op for noload relationships (it resets to unloaded
+    # rather than querying), so it must be fetched via an explicit
+    # selectinload query instead, same as update_package/publish_package do.
+    result = await db.execute(
+        select(Package).options(selectinload(Package.agency)).where(Package.id == pkg.id)
+    )
+    pkg = result.scalar_one()
     await invalidate_pattern("package:*")
     return _pkg_to_details(pkg)
 
@@ -331,6 +340,8 @@ async def update_package(
             setattr(pkg, _to_model_field(field), value)
         elif field == "base_price":
             pkg.price_per_person = value
+        elif field in {"start_date", "end_date"}:
+            setattr(pkg, field, datetime.fromisoformat(value) if value else None)
         else:
             db_field = _to_model_field(field)
             if hasattr(pkg, db_field):
