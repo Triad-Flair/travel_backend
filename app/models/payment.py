@@ -89,12 +89,20 @@ class PromotionalDiscount(TimestampsMixin, BaseModel):
     expires_at: Mapped[datetime | None] = mapped_column("expiresAt", DateTime(timezone=True), nullable=True)
 
 
-class PromoCodeUsage(TimestampsMixin, BaseModel):
+class PromoCodeUsage(BaseModel):
+    """Pre-existing table from before the FastAPI/SQLAlchemy port — no
+    createdAt/updatedAt, tracks usedAt/discountApplied instead. Confirmed
+    against the live schema (information_schema.columns) after the
+    TimestampsMixin-based version of this model crashed _finalize_capture
+    with asyncpg.exceptions.UndefinedColumnError: column "updatedAt" of
+    relation "promo_code_usages" does not exist."""
     __tablename__ = "promo_code_usages"
     __table_args__ = {"extend_existing": True}
     promo_id: Mapped[str] = mapped_column("promoId", String(36), nullable=False)
     user_id: Mapped[str] = mapped_column("userId", String(36), nullable=False)
-    payment_id: Mapped[str] = mapped_column("paymentId", String(36), ForeignKey("payments.id"), nullable=False)
+    payment_id: Mapped[str | None] = mapped_column("paymentId", String(36), ForeignKey("payments.id"), nullable=True)
+    discount_applied: Mapped[int] = mapped_column("discountApplied", Integer, nullable=False, default=0)
+    used_at: Mapped[datetime] = mapped_column("usedAt", DateTime(timezone=False), nullable=False, default=datetime.utcnow)
 
 
 class GstVerificationLog(TimestampsMixin, BaseModel):

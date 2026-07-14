@@ -283,6 +283,8 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
                     promo_id=promo.id,
                     user_id=payment.user_id,
                     payment_id=payment.id,
+                    discount_applied=int(payment.promo_discount_amount or 0),
+                    used_at=datetime.utcnow(),
                 )
             )
 
@@ -762,8 +764,25 @@ async def handle_hosted_checkout_callback(
         return f"{checkout_url}?payment=failed"
 
     payment.razorpay_payment_id = razorpay_payment_id
-    await _finalize_capture(db, payment)
-    await db.flush()
+    try:
+        await _finalize_capture(db, payment)
+        await db.flush()
+    except Exception:
+        # The signature is already verified above — Razorpay confirms the
+        # money genuinely moved — so a failure here is our own bookkeeping
+        # bug (invoice/notification/promo usage), not a failed payment. The
+        # payment.captured webhook fires independently and will retry this
+        # same finalization; there's nothing left in this request to show
+        # the payer except a raw crash page, which is worse than a
+        # momentarily-incomplete but honest "success". Roll back so the
+        # partially-applied changes don't leave the session unusable for
+        # the commit in get_db().
+        logger.exception(
+            "Post-capture finalization failed for payment %s after a verified Razorpay "
+            "payment — the payment.captured webhook will retry; the payer's money is not at risk.",
+            payment.id,
+        )
+        await db.rollback()
 
     return f"{checkout_url}?payment=success"
 

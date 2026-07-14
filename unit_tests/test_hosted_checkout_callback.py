@@ -106,6 +106,29 @@ async def test_valid_signature_finalizes_capture_and_redirects_to_success():
     assert "group-1" in url
 
 
+@pytest.mark.asyncio
+async def test_finalize_capture_crash_still_redirects_to_success_and_rolls_back():
+    """Confirmed live: _finalize_capture crashing here (the promo_code_usages
+    schema mismatch) propagated all the way to a raw 500 JSON page shown
+    directly in the payer's browser — there's no request originator left to
+    show an error to on this redirect flow. The signature is already
+    verified (Razorpay confirms the money moved), so this must still say
+    success and roll back cleanly rather than leaving the session in a
+    failed-flush state for get_db()'s commit."""
+    payment = _fake_payment()
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=payment)
+    db.rollback = AsyncMock()
+
+    with patch("app.services.payments.verify_signature", return_value=True), \
+         patch("app.services.payments._finalize_capture", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        url = await handle_hosted_checkout_callback(db, "order_abc", "pay_real", "sig_good")
+
+    db.rollback.assert_awaited_once()
+    assert "payment=success" in url
+    assert "group-1" in url
+
+
 # ── Router: parses the form POST and issues a 303 (never re-POSTs the body) ─
 
 def test_router_parses_form_post_and_redirects_with_303():
