@@ -523,6 +523,9 @@ async def create_payment_order(
         payment.razorpay_order_id = f"order_mock_{payment.id.replace('-', '')[:20]}"
 
     await db.flush()
+    # payment.updated_at has onupdate=func.now() — see the identical comment
+    # in services/offers.py::counter_offer for why this refresh is needed.
+    await db.refresh(payment)
 
     breakdown = dict(ctx["breakdown"])
     breakdown["pointsRedeemed"] = points

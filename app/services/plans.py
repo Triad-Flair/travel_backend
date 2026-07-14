@@ -368,6 +368,9 @@ async def update_plan(
         plan.cover_image_url = gallery[0] if gallery else None
 
     await db.flush()
+    # plan.updated_at has onupdate=func.now() — see the identical comment in
+    # services/offers.py::counter_offer for why this refresh is needed.
+    await db.refresh(plan)
     await invalidate(CacheKeys.plan_detail(plan_id))
     return _plan_to_details(plan)
 
