@@ -41,7 +41,7 @@ from app.services import invoices as inv_svc
 logger = logging.getLogger(__name__)
 
 PLATFORM_FEE_PAISE = 0  # no separate platform fee is charged to travelers — platform revenue is commission-only, deducted from the agency's payout
-FEE_GST_RATE = 0.18
+FEE_GST_RATE = 0.18  # GST is charged on the package price itself (18%), paid by the traveler on top — it's strictly between traveler and platform and never touches the agency's payout
 COMMISSION_RATE = 0.10
 TRANCHE_1_RATIO = 0.45
 TRANCHE_2_RATIO = 0.55
@@ -63,7 +63,7 @@ def _iso(value):
 
 
 def _compute_breakdown(trip_amount: int) -> dict:
-    fee_gst = int(round(PLATFORM_FEE_PAISE * FEE_GST_RATE))
+    fee_gst = int(round(trip_amount * FEE_GST_RATE))
     commission = int(round(trip_amount * COMMISSION_RATE))
     total = trip_amount + PLATFORM_FEE_PAISE + fee_gst
     return {

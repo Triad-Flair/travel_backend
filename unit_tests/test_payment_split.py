@@ -29,9 +29,12 @@ def test_compute_breakdown_platform_fee_is_fixed():
     assert breakdown["platformFeeAmount"] == PLATFORM_FEE_PAISE
 
 
-def test_compute_breakdown_gst_is_18_percent_of_platform_fee():
+def test_compute_breakdown_gst_is_18_percent_of_trip_amount():
+    """GST is charged on the package price itself, paid by the traveler on
+    top — not on the (now-removed) platform fee, and never deducted from
+    the agency's payout."""
     breakdown = _compute_breakdown(500000)
-    assert breakdown["feeGstAmount"] == int(round(PLATFORM_FEE_PAISE * FEE_GST_RATE))
+    assert breakdown["feeGstAmount"] == int(round(500000 * FEE_GST_RATE))
 
 
 def test_compute_breakdown_commission_is_10_percent_of_trip_amount():
@@ -44,12 +47,12 @@ def test_compute_breakdown_agency_net_excludes_commission():
     assert breakdown["agencyNetAmount"] == 500000 - 50000
 
 
-def test_compute_breakdown_total_is_trip_plus_fee_plus_gst_not_commission():
+def test_compute_breakdown_total_is_trip_plus_gst_not_commission():
     """Commission is the platform's cut of the agency's side — it must not
     also be added to what the traveler is charged (total = tripAmount +
-    platformFee + GST only)."""
+    GST only; platformFee is always 0)."""
     breakdown = _compute_breakdown(500000)
-    expected_total = 500000 + PLATFORM_FEE_PAISE + int(round(PLATFORM_FEE_PAISE * FEE_GST_RATE))
+    expected_total = 500000 + PLATFORM_FEE_PAISE + int(round(500000 * FEE_GST_RATE))
     assert breakdown["totalAmount"] == expected_total
 
 
@@ -58,8 +61,9 @@ def test_compute_breakdown_zero_trip_amount():
     assert breakdown["tripAmount"] == 0
     assert breakdown["commissionAmount"] == 0
     assert breakdown["agencyNetAmount"] == 0
-    # Platform fee + GST still apply even at zero trip amount
-    assert breakdown["totalAmount"] == PLATFORM_FEE_PAISE + int(round(PLATFORM_FEE_PAISE * FEE_GST_RATE))
+    # GST is a percentage of trip amount now, so it's 0 right along with it
+    # (no fixed platform fee left to keep GST non-zero at a zero trip amount).
+    assert breakdown["totalAmount"] == 0
 
 
 @pytest.mark.parametrize("trip_amount", [1, 999, 123456, 10_000_000])

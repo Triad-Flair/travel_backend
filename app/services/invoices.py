@@ -379,17 +379,17 @@ async def _build_user_invoice_data(db: AsyncSession, payment: Payment, invoice: 
                     subtotal=trip_amount,
                 ),
                 InvoiceLineItem(
-                    description="Platform Fee (GST extra)",
-                    subtext="Platform service fee",
+                    description="GST (18%)",
+                    subtext="Goods & Services Tax on package price",
                     qty=1,
                     unit="fixed",
-                    rate=platform_fee_amount + fee_gst_amount,
-                    subtotal=platform_fee_amount + fee_gst_amount,
-                ) if (platform_fee_amount + fee_gst_amount) > 0 else None,
+                    rate=fee_gst_amount,
+                    subtotal=fee_gst_amount,
+                ) if fee_gst_amount > 0 else None,
             ] if item is not None
         ],
         summary=InvoiceSummary(
-            subtotal=trip_amount + platform_fee_amount + fee_gst_amount,
+            subtotal=trip_amount + fee_gst_amount,
             trip_amount=trip_amount,
             platform_fee=platform_fee_amount,
             gst_on_platform_fee=fee_gst_amount,

@@ -40,10 +40,6 @@
           <tr><td>Total Collected from Traveler</td><td class="number">&#8377;{{ total_collected_inr }}</td></tr>
           <tr><td>Trip Amount (Gross)</td><td class="number">&#8377;{{ trip_amount_inr }}</td></tr>
           <tr><td>Platform Commission</td><td class="number">&minus;&#8377;{{ platform_commission_inr }}</td></tr>
-          {% if has_platform_fee %}
-          <tr><td>Platform Fee (charged to traveler, not deducted from agency)</td><td class="number">&#8377;{{ platform_fee_inr }}</td></tr>
-          <tr><td>GST on Platform Fee (charged to traveler, not deducted from agency)</td><td class="number">&#8377;{{ gst_on_fee_inr }}</td></tr>
-          {% endif %}
         </tbody>
         <tfoot>
           <tr><td>AGENCY NET PAYABLE</td><td class="number">&#8377;{{ agency_net_inr }}</td></tr>
