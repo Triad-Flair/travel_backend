@@ -369,22 +369,24 @@ async def _build_user_invoice_data(db: AsyncSession, payment: Payment, invoice: 
             vibes=[],
         ),
         line_items=[
-            InvoiceLineItem(
-                description=f"{trip_title} — {destination}",
-                subtext=f"{start_date or 'TBD'} → {end_date or 'TBD'}",
-                qty=traveler_count,
-                unit="person",
-                rate=per_person_rate,
-                subtotal=trip_amount,
-            ),
-            InvoiceLineItem(
-                description="Platform Fee (GST extra)",
-                subtext="Platform service fee",
-                qty=1,
-                unit="fixed",
-                rate=platform_fee_amount + fee_gst_amount,
-                subtotal=platform_fee_amount + fee_gst_amount,
-            ),
+            item for item in [
+                InvoiceLineItem(
+                    description=f"{trip_title} — {destination}",
+                    subtext=f"{start_date or 'TBD'} → {end_date or 'TBD'}",
+                    qty=traveler_count,
+                    unit="person",
+                    rate=per_person_rate,
+                    subtotal=trip_amount,
+                ),
+                InvoiceLineItem(
+                    description="Platform Fee (GST extra)",
+                    subtext="Platform service fee",
+                    qty=1,
+                    unit="fixed",
+                    rate=platform_fee_amount + fee_gst_amount,
+                    subtotal=platform_fee_amount + fee_gst_amount,
+                ) if (platform_fee_amount + fee_gst_amount) > 0 else None,
+            ] if item is not None
         ],
         summary=InvoiceSummary(
             subtotal=trip_amount + platform_fee_amount + fee_gst_amount,

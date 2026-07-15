@@ -91,6 +91,7 @@ def render_agency_settlement_pdf(payload: AgencySettlementResponse) -> bytes:
         "total_collected_inr": _inr(settlement["total_collected"]),
         "trip_amount_inr": _inr(settlement["trip_amount"]),
         "platform_commission_inr": _inr(settlement["platform_commission"]),
+        "has_platform_fee": (settlement["platform_fee"] + settlement["gst_on_fee"]) > 0,
         "platform_fee_inr": _inr(settlement["platform_fee"]),
         "gst_on_fee_inr": _inr(settlement["gst_on_fee"]),
         "agency_net_inr": _inr(settlement["agency_net_amount"]),

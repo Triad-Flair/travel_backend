@@ -40,7 +40,7 @@ from app.services import invoices as inv_svc
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_FEE_PAISE = 299 * 100
+PLATFORM_FEE_PAISE = 0  # no separate platform fee is charged to travelers — platform revenue is commission-only, deducted from the agency's payout
 FEE_GST_RATE = 0.18
 COMMISSION_RATE = 0.10
 TRANCHE_1_RATIO = 0.45
