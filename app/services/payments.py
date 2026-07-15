@@ -631,6 +631,17 @@ async def _promo_to_response(db: AsyncSession, promo: PromotionalDiscount) -> Pr
     times_used = await db.scalar(
         select(func.count(PromoCodeUsage.id)).where(PromoCodeUsage.promo_id == promo.id)
     ) or 0
+    # discount_applied per usage is the exact cost this promo code has
+    # imposed on the platform — trip_amount/commission (what the agency is
+    # owed) and fee_gst_amount (what's remitted to the government) are
+    # computed from the undiscounted breakdown and never reduced by a
+    # promo, so every rupee of discount here is a rupee the platform funds
+    # from its own margin/reserves rather than the traveler's payment.
+    total_discount_given = await db.scalar(
+        select(func.coalesce(func.sum(PromoCodeUsage.discount_applied), 0)).where(
+            PromoCodeUsage.promo_id == promo.id
+        )
+    ) or 0
     return PromoCodeResponse(
         id=promo.id,
         code=promo.code,
@@ -644,6 +655,7 @@ async def _promo_to_response(db: AsyncSession, promo: PromotionalDiscount) -> Pr
         per_user_limit=promo.per_user_limit,
         expires_at=promo.expires_at,
         times_used=int(times_used),
+        total_discount_given_paise=int(total_discount_given),
         created_at=promo.created_at,
     )
 

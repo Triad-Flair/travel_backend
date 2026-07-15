@@ -223,7 +223,7 @@ async def test_create_promo_code_rejects_duplicate_code():
 @pytest.mark.asyncio
 async def test_create_promo_code_happy_path_uppercases_code():
     db = AsyncMock()
-    db.scalar = AsyncMock(side_effect=[None, 0])  # no existing code, then times_used count
+    db.scalar = AsyncMock(side_effect=[None, 0, 0])  # no existing code, then times_used, then total discount
     created = {}
     db.add = lambda obj: created.__setitem__("promo", obj)
 

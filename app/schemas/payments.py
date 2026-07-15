@@ -58,6 +58,7 @@ class PromoCodeResponse(CamelModel):
     per_user_limit: int | None
     expires_at: datetime | None
     times_used: int
+    total_discount_given_paise: int
     created_at: datetime
 
 
