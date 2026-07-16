@@ -131,6 +131,35 @@ def _issue_password_reset_token(user: User) -> str:
     )
 
 
+async def _redeem_referral_code(db: AsyncSession, raw_code: str, new_user_id: str) -> None:
+    """Confirmed live: signup_traveler used to write the code a new user
+    typed in (someone else's existing, already-claimed referral code)
+    directly onto that NEW user's own `referral_code` column — the column
+    meant to hold their own future shareable code, unique per user
+    (see loyalty.py::get_or_create_referral_link/_generate_unique_referral_code).
+    Since referral_links.code is a real unique constraint, this collided
+    with the referrer's own row and 409'd every signup that included a
+    valid referral code. This instead marks the referrer's ReferralLink as
+    redeemed by the new user — never touches the new user's own row."""
+    from app.models.loyalty import ReferralLink
+
+    normalized = "".join(ch for ch in raw_code.upper() if ch.isalnum())[:8]
+    if not normalized:
+        return
+
+    link = await db.scalar(select(ReferralLink).where(ReferralLink.code == normalized))
+    if not link or link.used_by_user_id:
+        return
+    expires_at = link.expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at and expires_at <= datetime.now(UTC):
+        return
+
+    link.used_by_user_id = new_user_id
+    link.used_at = datetime.now(UTC)
+
+
 async def signup_traveler(db: AsyncSession, req: TravelerSignupRequest) -> SignupMessageResponse:
     username = req.username.strip().lower()
     email = req.email.strip().lower() if req.email else None
@@ -156,10 +185,12 @@ async def signup_traveler(db: AsyncSession, req: TravelerSignupRequest) -> Signu
         travel_style=req.travel_preferences,
         bio=req.bio,
         avatar_url=req.avatar_url,
-        referral_code=req.referral_code,
     )
     db.add(user)
     await db.flush()
+
+    if req.referral_code:
+        await _redeem_referral_code(db, req.referral_code, user.id)
 
     if email:
         verification_token = _issue_email_verification_token(user)
