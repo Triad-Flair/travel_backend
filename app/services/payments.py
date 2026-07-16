@@ -928,6 +928,8 @@ async def handle_razorpay_webhook(db: AsyncSession, event: str, payload: dict) -
         await _handle_payment_failed(db, payload)
     elif event == "payment.authorized":
         await _handle_payment_authorized(db, payload)
+    elif event in ("refund.created", "refund.processed", "payment.refunded"):
+        await _handle_payment_refunded(db, payload)
     elif event in DISPUTE_EVENT_STATUS:
         await _handle_payment_dispute(db, event, payload)
     elif event.startswith("payment.downtime."):
@@ -1028,6 +1030,47 @@ async def _handle_payment_authorized(db: AsyncSession, payload: dict) -> None:
             logger.exception("Explicit capture failed for authorized payment %s", payment.id)
             # Left AUTHORIZED — a retried webhook, a later payment.captured
             # event, or manual admin action can still resolve this.
+
+
+async def _handle_payment_refunded(db: AsyncSession, payload: dict) -> None:
+    """Confirmed live: a payment refunded directly from the Razorpay dashboard
+    (outside any code path this platform controls) left the Payment row
+    stuck showing CAPTURED forever — there was no handling at all for
+    refund.created/refund.processed/payment.refunded, so a real refund and
+    our own bookkeeping silently diverged. A refund can be full or partial;
+    either way payouts must stop immediately since the money that would fund
+    them may no longer be sitting in the platform's account.
+
+    refund.created/refund.processed nest the refund under payload["refund"],
+    payment.refunded nests the (now-refunded) payment under
+    payload["payment"] — try the refund entity first since it's the more
+    specific shape, falling back to the payment entity's own id."""
+    refund_entity = payload.get("refund", {}).get("entity", {})
+    payment_entity = payload.get("payment", {}).get("entity", {})
+    razorpay_payment_id = refund_entity.get("payment_id") or payment_entity.get("id")
+    if not razorpay_payment_id:
+        logger.warning("Refund webhook missing a payment id to correlate against")
+        return
+
+    payment = await db.scalar(select(Payment).where(Payment.razorpay_payment_id == razorpay_payment_id))
+    if not payment:
+        logger.warning("Refund webhook for unknown razorpay_payment_id=%s", razorpay_payment_id)
+        return
+    if payment.status == "REFUNDED":
+        return  # idempotent — refund.created and refund.processed both fire for the same refund
+
+    refunded_amount = refund_entity.get("amount") or payment_entity.get("amount_refunded") or payment.amount
+    payment.status = "REFUNDED"
+    payment.escrow_status = "REFUNDED"
+    # Freeze payouts outright, same mechanism a chargeback uses — whether or
+    # not a tranche already released, nothing further should go out for
+    # money that's been sent back to the traveler.
+    payment.payout_frozen = True
+    await db.flush()
+    logger.warning(
+        "Payment %s refunded (₹%s) — payouts frozen; any tranche already released needs manual reconciliation",
+        payment.id, int(refunded_amount) / 100,
+    )
 
 
 async def _handle_payment_dispute(db: AsyncSession, event: str, payload: dict) -> None:
@@ -1221,6 +1264,11 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
         raise BadRequestError(
             "This payment has an open Razorpay chargeback — payouts are frozen until it's resolved."
         )
+    if payment.status != "CAPTURED":
+        # Belt-and-suspenders alongside payout_frozen (which a refund also
+        # sets) — a payment that was never actually captured (PENDING,
+        # FAILED, AUTHORIZED) has no real money behind it either.
+        raise BadRequestError(f"Cannot pay out a payment that isn't captured (status: {payment.status})")
 
     already_released = bool(payment.tranche2_released) if tranche == "tranche2" else bool(payment.tranche1_released)
     if already_released:

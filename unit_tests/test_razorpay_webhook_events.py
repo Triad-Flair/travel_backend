@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.exceptions import PaymentError
+from app.exceptions import BadRequestError, PaymentError
 from app.services.payments import (
     DISPUTE_STATUSES_FREEZE_PAYOUT,
     DISPUTE_STATUSES_UNFREEZE_PAYOUT,
@@ -117,6 +117,94 @@ async def test_failed_never_downgrades_an_already_captured_payment():
     await handle_razorpay_webhook(db, "payment.failed", {"payment": {"entity": {"order_id": "order_abc"}}})
 
     assert payment.status == "CAPTURED"
+
+
+# ── refund.created/refund.processed/payment.refunded ───────────────────────
+# Confirmed live: a payment refunded directly from the Razorpay dashboard
+# left our Payment row stuck showing CAPTURED forever — there was no
+# handling at all for any refund event, so a real refund and our own
+# bookkeeping silently diverged, with nothing stopping a later payout
+# attempt against money that no longer existed in the platform's account.
+
+@pytest.mark.asyncio
+async def test_refund_created_marks_payment_refunded_and_freezes_payout():
+    payment = _fake_payment(status="CAPTURED", payout_frozen=False)
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=payment)
+
+    await handle_razorpay_webhook(
+        db, "refund.created",
+        {"refund": {"entity": {"payment_id": "pay_x", "amount": 462900}}},
+    )
+
+    assert payment.status == "REFUNDED"
+    assert payment.escrow_status == "REFUNDED"
+    assert payment.payout_frozen is True
+
+
+@pytest.mark.asyncio
+async def test_payment_refunded_event_falls_back_to_payment_entity_id():
+    """payment.refunded nests under payload["payment"], not payload["refund"]
+    — must still correlate correctly using that shape."""
+    payment = _fake_payment(status="CAPTURED")
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=payment)
+
+    await handle_razorpay_webhook(
+        db, "payment.refunded",
+        {"payment": {"entity": {"id": "pay_x", "amount_refunded": 462900}}},
+    )
+
+    assert payment.status == "REFUNDED"
+
+
+@pytest.mark.asyncio
+async def test_refund_processed_is_idempotent_after_refund_created():
+    payment = _fake_payment(status="REFUNDED", escrow_status="REFUNDED", payout_frozen=True)
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=payment)
+
+    await handle_razorpay_webhook(
+        db, "refund.processed",
+        {"refund": {"entity": {"payment_id": "pay_x", "amount": 462900}}},
+    )
+
+    db.flush.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refund_for_unknown_payment_is_a_noop():
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=None)
+
+    await handle_razorpay_webhook(
+        db, "refund.created",
+        {"refund": {"entity": {"payment_id": "pay_ghost", "amount": 1000}}},
+    )
+
+    db.flush.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_agency_payout_refuses_when_payment_not_captured():
+    payment = _fake_payment(status="REFUNDED", payout_frozen=True)
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=payment)
+
+    with pytest.raises(BadRequestError, match="chargeback"):
+        await execute_agency_payout(db, "payment-1", "tranche1")
+
+
+@pytest.mark.asyncio
+async def test_execute_agency_payout_refuses_pending_payment_even_when_not_frozen():
+    """Belt-and-suspenders: a payment that's simply never been captured
+    (no refund involved at all) must also be refused, not just a frozen one."""
+    payment = _fake_payment(status="PENDING", payout_frozen=False)
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=payment)
+
+    with pytest.raises(BadRequestError, match="isn't captured"):
+        await execute_agency_payout(db, "payment-1", "tranche1")
 
 
 # ── payment.dispute.* (real chargebacks, distinct from customer Dispute) ───

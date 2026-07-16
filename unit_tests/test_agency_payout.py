@@ -11,6 +11,7 @@ from app.services.payments import execute_agency_payout
 def _fake_payment(**overrides):
     defaults = dict(
         id="payment-1",
+        status="CAPTURED",
         trip_amount=500000,
         commission_amount=50000,
         razorpay_payment_id="pay_real_abc123",
