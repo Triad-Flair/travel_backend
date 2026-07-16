@@ -52,11 +52,18 @@ async def test_credit_referral_bonus_creates_wallet_when_none_exists():
     added = []
     db.add = lambda obj: added.append(obj)
 
-    await credit_referral_bonus(db, "referrer-1", "referred-1")
+    await credit_referral_bonus(db, "referrer-1", "referred-1", referral_link_id="link-1")
 
     wallet = next(obj for obj in added if type(obj).__name__ == "ReferralWallet")
+    transaction = next(obj for obj in added if type(obj).__name__ == "ReferralWalletTransaction")
     assert wallet.balance == REFERRAL_BONUS_RUPEES
     assert wallet.total_earned == REFERRAL_BONUS_RUPEES
+    # idempotencyKey is NOT NULL with a real unique constraint on the live
+    # table — a second credit attempt for the same referred user must fail
+    # at the DB level rather than silently double-crediting.
+    assert transaction.idempotency_key == "referral:referred-1"
+    assert transaction.referral_id == "link-1"
+    assert transaction.type == "referral_earned"
 
 
 @pytest.mark.asyncio

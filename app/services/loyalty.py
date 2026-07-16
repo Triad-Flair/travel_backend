@@ -236,11 +236,16 @@ async def get_agency_referrals(db: AsyncSession, user_id: str) -> list[dict]:
     return result
 
 
-async def credit_referral_bonus(db: AsyncSession, referrer_user_id: str, referred_user_id: str) -> None:
+async def credit_referral_bonus(
+    db: AsyncSession, referrer_user_id: str, referred_user_id: str, referral_link_id: str | None = None
+) -> None:
     """Actually credits the ₹250 that get_my_referrals/get_referral_stats
     already claimed was "earned" — called once, right when a referral code
-    is redeemed (see auth.py::_redeem_referral_code), so it's naturally
-    idempotent: that caller only ever runs this path once per ReferralLink."""
+    is redeemed (see auth.py::_redeem_referral_code). Doubly idempotent:
+    that caller only ever runs this path once per ReferralLink, and
+    idempotencyKey carries a real unique constraint on the live table, so
+    a second attempt for the same referred user fails at the DB level
+    instead of silently double-crediting."""
     wallet = await db.scalar(select(ReferralWallet).where(ReferralWallet.user_id == referrer_user_id))
     if not wallet:
         wallet = ReferralWallet(id=str(uuid.uuid4()), user_id=referrer_user_id, balance=0, total_earned=0, total_spent=0)
@@ -257,6 +262,8 @@ async def credit_referral_bonus(db: AsyncSession, referrer_user_id: str, referre
             amount=REFERRAL_BONUS_RUPEES,
             description="Referral bonus — friend signed up with your code",
             reference_id=referred_user_id,
+            idempotency_key=f"referral:{referred_user_id}",
+            referral_id=referral_link_id,
         )
     )
 

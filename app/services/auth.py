@@ -165,7 +165,7 @@ async def _redeem_referral_code(db: AsyncSession, raw_code: str, new_user_id: st
 
     link.used_by_user_id = new_user_id
     link.used_at = datetime.now(UTC)
-    await credit_referral_bonus(db, link.user_id, new_user_id)
+    await credit_referral_bonus(db, link.user_id, new_user_id, referral_link_id=link.id)
 
 
 async def signup_traveler(db: AsyncSession, req: TravelerSignupRequest) -> SignupMessageResponse:

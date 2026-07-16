@@ -72,6 +72,8 @@ async def test_redeem_referral_code_credits_referrer_wallet():
     assert wallet.total_earned == REFERRAL_BONUS_RUPEES
     assert transaction.amount == REFERRAL_BONUS_RUPEES
     assert transaction.reference_id == "new-user-1"
+    assert transaction.idempotency_key == "referral:new-user-1"
+    assert transaction.referral_id == link.id
 
 
 @pytest.mark.asyncio

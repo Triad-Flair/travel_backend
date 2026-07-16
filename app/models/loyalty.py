@@ -74,5 +74,12 @@ class ReferralWalletTransaction(CreatedAtMixin, BaseModel):
     amount: Mapped[int] = mapped_column("amount", Integer, nullable=False)
     description: Mapped[str | None] = mapped_column("description", Text, nullable=True)
     reference_id: Mapped[str | None] = mapped_column("referenceId", String(100), nullable=True)
+    # NOT NULL with a real unique constraint on the live table — gives a
+    # genuine DB-level guarantee against double-crediting the same event,
+    # confirmed against information_schema/pg_indexes after the first
+    # insert attempt failed on this column not existing in this model at all.
+    idempotency_key: Mapped[str] = mapped_column("idempotencyKey", String(150), nullable=False, unique=True)
+    payment_id: Mapped[str | None] = mapped_column("paymentId", String(36), nullable=True)
+    referral_id: Mapped[str | None] = mapped_column("referralId", String(36), nullable=True)
 
     wallet = relationship("ReferralWallet", back_populates="transactions")
