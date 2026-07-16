@@ -262,42 +262,59 @@ async def credit_referral_bonus(db: AsyncSession, referrer_user_id: str, referre
 
 
 async def get_my_referrals(db: AsyncSession, user_id: str, page: int, page_size: int) -> dict:
+    """Reads from ReferralWalletTransaction (one durable row per completed
+    referral), not ReferralLink.used_by_user_id. That column can only ever
+    hold a single referred user at a time — get_or_create_referral_link
+    resets it to None the moment the referrer's own dashboard loads again
+    after a completed referral, to rotate in a fresh shareable code. That
+    made this list (and the stats derived from it) lose its own history on
+    the very next page view — confirmed live: a real completed referral
+    showing "1 completed, ₹250 earned" reset to zero after the referrer
+    reloaded their Refer & Earn page. The wallet transaction ledger has no
+    such one-slot limit."""
+    wallet = await db.scalar(select(ReferralWallet).where(ReferralWallet.user_id == user_id))
+    if not wallet:
+        return {
+            "referrals": [],
+            "pagination": {"page": page, "pageSize": page_size, "total": 0, "pages": 0},
+        }
+
     rows = await db.execute(
-        select(ReferralLink)
+        select(ReferralWalletTransaction)
         .where(
-            ReferralLink.user_id == user_id,
-            ReferralLink.used_by_user_id.is_not(None),
+            ReferralWalletTransaction.wallet_id == wallet.id,
+            ReferralWalletTransaction.type == "REFERRAL_BONUS",
         )
-        .order_by(ReferralLink.updated_at.desc())
+        .order_by(ReferralWalletTransaction.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    links = rows.scalars().all()
+    transactions = rows.scalars().all()
 
     total = await db.scalar(
-        select(func.count(ReferralLink.id)).where(
-            ReferralLink.user_id == user_id,
-            ReferralLink.used_by_user_id.is_not(None),
+        select(func.count(ReferralWalletTransaction.id)).where(
+            ReferralWalletTransaction.wallet_id == wallet.id,
+            ReferralWalletTransaction.type == "REFERRAL_BONUS",
         )
     ) or 0
 
     referrals = []
-    for link in links:
-        referred = await db.scalar(select(User).where(User.id == link.used_by_user_id))
+    for tx in transactions:
+        referred = await db.scalar(select(User).where(User.id == tx.reference_id))
         referrals.append(
             {
-                "id": link.id,
+                "id": tx.id,
                 "referredUser": {
-                    "id": referred.id if referred else link.used_by_user_id,
+                    "id": referred.id if referred else tx.reference_id,
                     "fullName": (referred.display_name or referred.username or "New user") if referred else "New user",
                     "email": referred.email if referred else None,
                     "avatarUrl": referred.avatar_url if referred else None,
-                    "createdAt": _iso(referred.created_at) if referred else _iso(link.created_at),
+                    "createdAt": _iso(referred.created_at) if referred else _iso(tx.created_at),
                 },
                 "status": "COMPLETED",
-                "earnedAmount": REFERRAL_BONUS_RUPEES,
-                "completedAt": _iso(link.used_at),
-                "createdAt": _iso(link.created_at),
+                "earnedAmount": int(tx.amount),
+                "completedAt": _iso(tx.created_at),
+                "createdAt": _iso(tx.created_at),
             }
         )
 
