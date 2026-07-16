@@ -253,7 +253,7 @@ async def credit_referral_bonus(db: AsyncSession, referrer_user_id: str, referre
         ReferralWalletTransaction(
             id=str(uuid.uuid4()),
             wallet_id=wallet.id,
-            type="REFERRAL_BONUS",
+            type="referral_earned",
             amount=REFERRAL_BONUS_RUPEES,
             description="Referral bonus — friend signed up with your code",
             reference_id=referred_user_id,
@@ -283,7 +283,7 @@ async def get_my_referrals(db: AsyncSession, user_id: str, page: int, page_size:
         select(ReferralWalletTransaction)
         .where(
             ReferralWalletTransaction.wallet_id == wallet.id,
-            ReferralWalletTransaction.type == "REFERRAL_BONUS",
+            ReferralWalletTransaction.type == "referral_earned",
         )
         .order_by(ReferralWalletTransaction.created_at.desc())
         .offset((page - 1) * page_size)
@@ -294,7 +294,7 @@ async def get_my_referrals(db: AsyncSession, user_id: str, page: int, page_size:
     total = await db.scalar(
         select(func.count(ReferralWalletTransaction.id)).where(
             ReferralWalletTransaction.wallet_id == wallet.id,
-            ReferralWalletTransaction.type == "REFERRAL_BONUS",
+            ReferralWalletTransaction.type == "referral_earned",
         )
     ) or 0
 

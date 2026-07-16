@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, CreatedAtMixin, TimestampsMixin
@@ -59,7 +60,17 @@ class ReferralWalletTransaction(CreatedAtMixin, BaseModel):
     __table_args__ = {"extend_existing": True}
 
     wallet_id: Mapped[str] = mapped_column("walletId", String(36), ForeignKey("referral_wallets.id"), nullable=False, index=True)
-    type: Mapped[str] = mapped_column("type", String(30), nullable=False)
+    # Confirmed against the live DB (nothing had ever actually inserted a
+    # row here before credit_referral_bonus): this is a real Postgres enum,
+    # not a free-text varchar, with values referral_earned/checkout_spent/
+    # admin_credit/admin_debit — not the "REFERRAL_BONUS" this code
+    # originally assumed.
+    type: Mapped[str] = mapped_column(
+        "type",
+        PgEnum("referral_earned", "checkout_spent", "admin_credit", "admin_debit",
+               name="ReferralWalletTransactionType", create_type=False),
+        nullable=False,
+    )
     amount: Mapped[int] = mapped_column("amount", Integer, nullable=False)
     description: Mapped[str | None] = mapped_column("description", Text, nullable=True)
     reference_id: Mapped[str | None] = mapped_column("referenceId", String(100), nullable=True)
