@@ -140,8 +140,15 @@ async def _redeem_referral_code(db: AsyncSession, raw_code: str, new_user_id: st
     Since referral_links.code is a real unique constraint, this collided
     with the referrer's own row and 409'd every signup that included a
     valid referral code. This instead marks the referrer's ReferralLink as
-    redeemed by the new user — never touches the new user's own row."""
+    redeemed by the new user — never touches the new user's own row.
+
+    Also credits the referrer's real wallet balance — get_my_referrals/
+    get_referral_stats already reported every completed referral as
+    "earning ₹250", but nothing had ever actually credited a real
+    ReferralWallet anywhere, so the dashboard showed the bonus while the
+    wallet (and checkout's "use wallet balance") stayed at ₹0."""
     from app.models.loyalty import ReferralLink
+    from app.services.loyalty import credit_referral_bonus
 
     normalized = "".join(ch for ch in raw_code.upper() if ch.isalnum())[:8]
     if not normalized:
@@ -158,6 +165,7 @@ async def _redeem_referral_code(db: AsyncSession, raw_code: str, new_user_id: st
 
     link.used_by_user_id = new_user_id
     link.used_at = datetime.now(UTC)
+    await credit_referral_bonus(db, link.user_id, new_user_id)
 
 
 async def signup_traveler(db: AsyncSession, req: TravelerSignupRequest) -> SignupMessageResponse:

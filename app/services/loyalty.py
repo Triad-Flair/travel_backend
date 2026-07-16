@@ -20,6 +20,13 @@ from app.schemas.loyalty import (
 from app.models.enums import LoyaltyAction
 
 REFERRAL_LINK_EXPIRY_DAYS = 30
+# get_my_referrals reported every completed referral as "earning" this
+# amount long before anything actually credited it anywhere — confirmed
+# live: the Refer & Earn dashboard showed "1 completed, ₹250 earned" while
+# the real wallet balance sat at ₹0, because this was a pure display
+# number with no corresponding ReferralWallet credit. Shared here so the
+# display and the actual credit can never drift apart.
+REFERRAL_BONUS_RUPEES = 250
 
 
 def _iso(value):
@@ -229,6 +236,31 @@ async def get_agency_referrals(db: AsyncSession, user_id: str) -> list[dict]:
     return result
 
 
+async def credit_referral_bonus(db: AsyncSession, referrer_user_id: str, referred_user_id: str) -> None:
+    """Actually credits the ₹250 that get_my_referrals/get_referral_stats
+    already claimed was "earned" — called once, right when a referral code
+    is redeemed (see auth.py::_redeem_referral_code), so it's naturally
+    idempotent: that caller only ever runs this path once per ReferralLink."""
+    wallet = await db.scalar(select(ReferralWallet).where(ReferralWallet.user_id == referrer_user_id))
+    if not wallet:
+        wallet = ReferralWallet(id=str(uuid.uuid4()), user_id=referrer_user_id, balance=0, total_earned=0, total_spent=0)
+        db.add(wallet)
+        await db.flush()
+
+    wallet.balance = int(wallet.balance or 0) + REFERRAL_BONUS_RUPEES
+    wallet.total_earned = int(wallet.total_earned or 0) + REFERRAL_BONUS_RUPEES
+    db.add(
+        ReferralWalletTransaction(
+            id=str(uuid.uuid4()),
+            wallet_id=wallet.id,
+            type="REFERRAL_BONUS",
+            amount=REFERRAL_BONUS_RUPEES,
+            description="Referral bonus — friend signed up with your code",
+            reference_id=referred_user_id,
+        )
+    )
+
+
 async def get_my_referrals(db: AsyncSession, user_id: str, page: int, page_size: int) -> dict:
     rows = await db.execute(
         select(ReferralLink)
@@ -263,7 +295,7 @@ async def get_my_referrals(db: AsyncSession, user_id: str, page: int, page_size:
                     "createdAt": _iso(referred.created_at) if referred else _iso(link.created_at),
                 },
                 "status": "COMPLETED",
-                "earnedAmount": 250,
+                "earnedAmount": REFERRAL_BONUS_RUPEES,
                 "completedAt": _iso(link.used_at),
                 "createdAt": _iso(link.created_at),
             }

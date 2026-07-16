@@ -144,6 +144,56 @@ def check_payment_windows(self):
         raise self.retry(exc=exc, countdown=30)
 
 
+@celery_app.task(name="app.workers.tasks.check_completed_trips", bind=True, max_retries=3)
+def check_completed_trips(self):
+    """Confirmed live: a real captured payment sat with Transfer: -- on
+    Razorpay indefinitely — nothing anywhere ever called complete_trip
+    (or execute_agency_payout) automatically; both were reachable only via
+    manual admin action nobody was taking. This finds every CONFIRMED
+    plan/package whose trip has actually ended and completes it, which
+    releases any still-unpaid tranche (typically tranche2, the 55% final
+    payout — tranche1 already auto-releases at booking confirmation, see
+    services/payments.py::_release_tranche1_for_group). Self-limiting: once
+    complete_trip flips status to COMPLETED, the same trip no longer
+    matches this query on the next run."""
+    async def _task():
+        from sqlalchemy import select
+        from app.database import AsyncSessionLocal
+        from app.models.group import Group
+        from app.models.package import Package
+        from app.models.plan import Plan
+        from app.services.payments import complete_trip
+
+        now = datetime.now(UTC)
+        async with AsyncSessionLocal() as db:
+            plan_groups = await db.execute(
+                select(Group.id)
+                .join(Plan, Plan.id == Group.plan_id)
+                .where(Plan.status == "CONFIRMED", Plan.end_date <= now)
+            )
+            package_groups = await db.execute(
+                select(Group.id)
+                .join(Package, Package.id == Group.package_id)
+                .where(Package.status == "CONFIRMED", Package.end_date <= now)
+            )
+            group_ids = {row[0] for row in plan_groups.all()} | {row[0] for row in package_groups.all()}
+
+            for group_id in group_ids:
+                try:
+                    await complete_trip(db, group_id)
+                    await db.commit()
+                except Exception:
+                    logger.exception("Auto trip completion failed for group %s", group_id)
+                    await db.rollback()
+
+            logger.info("Trip completion job checked %d group(s) at %s", len(group_ids), now)
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=300)
+
+
 @celery_app.task(name="app.workers.tasks.notify_direct_message", bind=True, max_retries=2)
 def notify_direct_message(self, recipient_id: str, sender_name: str, content_preview: str):
     """Send a WhatsApp push when a DM arrives — runs off the hot request path."""

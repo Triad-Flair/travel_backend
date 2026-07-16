@@ -43,7 +43,9 @@ def _signup_request(**overrides):
 async def test_redeem_referral_code_marks_link_used():
     link = _fake_link()
     db = AsyncMock()
-    db.scalar = AsyncMock(return_value=link)
+    # 1st scalar: the ReferralLink lookup. 2nd: credit_referral_bonus's own
+    # ReferralWallet lookup (None -> it creates a fresh one).
+    db.scalar = AsyncMock(side_effect=[link, None])
 
     await _redeem_referral_code(db, "abcd1234", "new-user-1")
 
@@ -52,10 +54,46 @@ async def test_redeem_referral_code_marks_link_used():
 
 
 @pytest.mark.asyncio
+async def test_redeem_referral_code_credits_referrer_wallet():
+    from app.services.loyalty import REFERRAL_BONUS_RUPEES
+
+    link = _fake_link(user_id="referrer-1")
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[link, None])
+    added = []
+    db.add = lambda obj: added.append(obj)
+
+    await _redeem_referral_code(db, "abcd1234", "new-user-1")
+
+    wallet = next(obj for obj in added if type(obj).__name__ == "ReferralWallet")
+    transaction = next(obj for obj in added if type(obj).__name__ == "ReferralWalletTransaction")
+    assert wallet.user_id == "referrer-1"
+    assert wallet.balance == REFERRAL_BONUS_RUPEES
+    assert wallet.total_earned == REFERRAL_BONUS_RUPEES
+    assert transaction.amount == REFERRAL_BONUS_RUPEES
+    assert transaction.reference_id == "new-user-1"
+
+
+@pytest.mark.asyncio
+async def test_redeem_referral_code_adds_to_existing_wallet_balance():
+    from app.services.loyalty import REFERRAL_BONUS_RUPEES
+
+    link = _fake_link(user_id="referrer-1")
+    existing_wallet = SimpleNamespace(id="wallet-1", user_id="referrer-1", balance=100, total_earned=100, total_spent=0)
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[link, existing_wallet])
+
+    await _redeem_referral_code(db, "abcd1234", "new-user-1")
+
+    assert existing_wallet.balance == 100 + REFERRAL_BONUS_RUPEES
+    assert existing_wallet.total_earned == 100 + REFERRAL_BONUS_RUPEES
+
+
+@pytest.mark.asyncio
 async def test_redeem_referral_code_normalizes_case_and_punctuation():
     link = _fake_link(code="ABCD1234")
     db = AsyncMock()
-    db.scalar = AsyncMock(return_value=link)
+    db.scalar = AsyncMock(side_effect=[link, None])
 
     await _redeem_referral_code(db, "abcd-1234", "new-user-1")
 

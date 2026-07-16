@@ -321,6 +321,8 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
         )
     ) or 0
 
+    trip_just_confirmed = False
+
     if group.plan_id:
         plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id))
         if plan:
@@ -328,6 +330,7 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
             if int(captured_count) >= min_required and int(captured_count) == len(member_user_ids):
                 plan.status = "CONFIRMED"
                 plan.confirmed_at = datetime.now(UTC)
+                trip_just_confirmed = True
             elif plan.status == "OPEN":
                 plan.status = "CONFIRMING"
 
@@ -337,12 +340,41 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
             min_required = max(1, int(package.group_size_min or 1))
             if int(captured_count) >= min_required and int(captured_count) == len(member_user_ids):
                 package.status = "CONFIRMED"
+                trip_just_confirmed = True
             elif package.status == "OPEN":
                 package.status = "CONFIRMING"
 
     await inv_svc._ensure_invoice(db, payment)
     await db.flush()
     await _send_capture_notifications(db, payment)
+
+    if trip_just_confirmed:
+        await _release_tranche1_for_group(db, payment.group_id, member_user_ids)
+
+
+async def _release_tranche1_for_group(db: AsyncSession, group_id: str, member_user_ids: list[str]) -> None:
+    """Auto-releases the 45% advance payout the instant every required
+    traveler has paid and the trip flips to CONFIRMED. Before this,
+    nothing anywhere ever called execute_agency_payout automatically — it
+    was reachable only via a manual admin endpoint nobody was hitting,
+    confirmed live by a real captured payment sitting with `Transfer: --`
+    on Razorpay indefinitely. A transfer failure here must never abort the
+    capture flow that's already committed to notifying/invoicing the
+    traveler — logged and left for retry via the same admin endpoint or a
+    later automatic pass, not re-raised."""
+    rows = await db.execute(
+        select(Payment).where(
+            Payment.group_id == group_id,
+            Payment.user_id.in_(member_user_ids),
+            Payment.status == "CAPTURED",
+            Payment.tranche1_released == False,  # noqa: E712 — SQLAlchemy needs `== False`, not `is False`
+        )
+    )
+    for member_payment in rows.scalars().all():
+        try:
+            await execute_agency_payout(db, member_payment.id, "tranche1")
+        except Exception:
+            logger.exception("Auto tranche1 payout failed for payment %s", member_payment.id)
 
 
 async def list_my_payments(
