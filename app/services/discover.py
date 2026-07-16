@@ -192,7 +192,7 @@ async def get_discover_feed(
         raw_plans = list(result.scalars().all())
 
     if show_packages and filters.origin_type in (None, "package"):
-        q = select(Package).options(selectinload(Package.agency)).where(Package.status == 'OPEN')
+        q = select(Package).options(selectinload(Package.agency)).where(Package.status.in_(['OPEN', 'CONFIRMING']))
         if filters.destination:
             q = q.where(Package.destination.ilike(f"%{filters.destination}%"))
         if filters.budget_min:
@@ -253,7 +253,7 @@ async def get_trending(
     result = await db.execute(
         select(Package)
         .options(selectinload(Package.agency))
-        .where(Package.status == 'OPEN')
+        .where(Package.status.in_(['OPEN', 'CONFIRMING']))
         .order_by(Package.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -293,7 +293,7 @@ async def search(
             select(Package)
             .options(selectinload(Package.agency))
             .where(
-                Package.status == 'OPEN',
+                Package.status.in_(['OPEN', 'CONFIRMING']),
                 (Package.title.ilike(term) | Package.destination.ilike(term)),
             )
             .order_by(Package.created_at.desc())
@@ -352,7 +352,7 @@ async def get_following_feed(
     if filters.origin_type in (None, "package") and followed_agency_ids:
         package_query = select(Package).where(
             Package.agency_id.in_(followed_agency_ids),
-            Package.status == "OPEN",
+            Package.status.in_(["OPEN", "CONFIRMING"]),
         )
         if filters.destination:
             package_query = package_query.where(Package.destination.ilike(f"%{filters.destination}%"))
