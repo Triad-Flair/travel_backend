@@ -6,8 +6,10 @@ import pytest
 from app.services.payments import (
     FEE_GST_RATE,
     PLATFORM_FEE_PAISE,
+    POINTS_USAGE_CAP_RATE,
     TRANCHE_1_RATIO,
     TRANCHE_2_RATIO,
+    WALLET_USAGE_CAP_RATE,
     _compute_breakdown,
     _tranche_amount,
 )
@@ -92,3 +94,17 @@ def test_unknown_tranche_label_defaults_to_tranche1_ratio():
     """_tranche_amount treats anything other than the literal string
     'tranche2' as tranche1 — documenting that behavior explicitly."""
     assert _tranche_amount(100000, "garbage") == _tranche_amount(100000, "tranche1")
+
+
+def test_wallet_usage_cap_is_50_percent():
+    """A traveler can cover up to half the trip amount from wallet balance
+    in a single purchase — was 20%, raised per explicit request. Pinned
+    here since _get_payment_context (where this is actually applied) has
+    too many DB dependencies to unit test directly."""
+    assert WALLET_USAGE_CAP_RATE == 0.50
+
+
+def test_points_usage_cap_is_unchanged_at_20_percent():
+    """The wallet cap change was deliberately scoped to wallet only —
+    points redemption stays at its existing 20% cap."""
+    assert POINTS_USAGE_CAP_RATE == 0.20

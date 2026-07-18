@@ -45,6 +45,8 @@ FEE_GST_RATE = 0.18  # GST is charged on the package price itself (18%), paid by
 COMMISSION_RATE = 0.10
 TRANCHE_1_RATIO = 0.45
 TRANCHE_2_RATIO = 0.55
+WALLET_USAGE_CAP_RATE = 0.50  # max share of the trip amount a traveler can cover from wallet balance in one purchase
+POINTS_USAGE_CAP_RATE = 0.20
 
 ACTIVE_MEMBER_STATUSES = {"APPROVED", "COMMITTED"}
 
@@ -235,8 +237,8 @@ async def _get_payment_context(db: AsyncSession, group_id: str, user_id: str) ->
     wallet_rupees = int(wallet.balance or 0) if wallet else 0
 
     breakdown = _compute_breakdown(trip_amount)
-    max_redeemable_points = max(0, min(loyalty_points, int(trip_amount * 0.20 / 100)))
-    max_wallet_usable_rupees = max(0, min(wallet_rupees, int(trip_amount * 0.20 / 100)))
+    max_redeemable_points = max(0, min(loyalty_points, int(trip_amount * POINTS_USAGE_CAP_RATE / 100)))
+    max_wallet_usable_rupees = max(0, min(wallet_rupees, int(trip_amount * WALLET_USAGE_CAP_RATE / 100)))
 
     if payment and payment.status == "CAPTURED":
         checkout_mode = "captured"
