@@ -35,6 +35,8 @@ def _fake_promo(**overrides):
         usage_limit=None,
         per_user_limit=1,
         expires_at=None,
+        package_id=None,
+        agency_id=None,
         created_at=datetime.now(UTC),
     )
     defaults.update(overrides)
@@ -147,7 +149,7 @@ async def test_resolve_promo_rejects_blank_code():
 async def test_validate_promo_returns_valid_response(monkeypatch):
     from app.services import payments as pay_svc
 
-    ctx = {"breakdown": {"totalAmount": 500_00}}
+    ctx = {"breakdown": {"totalAmount": 500_00}, "package": None, "agency": None}
     monkeypatch.setattr(pay_svc, "_get_payment_context", AsyncMock(return_value=ctx))
     db = _db_returning(_fake_promo(discount_type="PERCENTAGE", discount_value=90, per_user_limit=None))
 
@@ -162,7 +164,7 @@ async def test_validate_promo_returns_valid_response(monkeypatch):
 async def test_validate_promo_returns_invalid_response_for_bad_code(monkeypatch):
     from app.services import payments as pay_svc
 
-    ctx = {"breakdown": {"totalAmount": 500_00}}
+    ctx = {"breakdown": {"totalAmount": 500_00}, "package": None, "agency": None}
     monkeypatch.setattr(pay_svc, "_get_payment_context", AsyncMock(return_value=ctx))
     db = _db_returning(None)
 
@@ -241,3 +243,93 @@ async def test_create_promo_code_happy_path_uppercases_code():
     assert result.code == "WELCOME90"
     assert result.is_active is True
     assert result.times_used == 0
+
+
+# ── package/agency scoping ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_resolve_promo_rejects_when_package_does_not_match():
+    db = _db_returning(_fake_promo(package_id="pkg-1", per_user_limit=None))
+    promo, discount, message = await _resolve_promo_discount(
+        db, "WELCOME90", "user-1", 500_00, package_id="pkg-2", agency_id="agency-1",
+    )
+    assert promo is None
+    assert discount == 0
+    assert "isn't valid for this package" in message
+
+
+@pytest.mark.asyncio
+async def test_resolve_promo_accepts_matching_package():
+    db = _db_returning(_fake_promo(package_id="pkg-1", per_user_limit=None))
+    promo, discount, _ = await _resolve_promo_discount(
+        db, "WELCOME90", "user-1", 500_00, package_id="pkg-1", agency_id="agency-1",
+    )
+    assert promo is not None
+    assert discount == 450_00
+
+
+@pytest.mark.asyncio
+async def test_resolve_promo_rejects_when_agency_does_not_match():
+    db = _db_returning(_fake_promo(agency_id="agency-1", per_user_limit=None))
+    promo, discount, message = await _resolve_promo_discount(
+        db, "WELCOME90", "user-1", 500_00, package_id="pkg-1", agency_id="agency-2",
+    )
+    assert promo is None
+    assert discount == 0
+    assert "isn't valid for this agency" in message
+
+
+@pytest.mark.asyncio
+async def test_resolve_promo_unrestricted_code_applies_to_any_package_or_agency():
+    """package_id/agency_id both None on the code means unrestricted —
+    must not reject just because the checkout has a package/agency."""
+    db = _db_returning(_fake_promo(per_user_limit=None))
+    promo, discount, _ = await _resolve_promo_discount(
+        db, "WELCOME90", "user-1", 500_00, package_id="pkg-1", agency_id="agency-1",
+    )
+    assert promo is not None
+    assert discount == 450_00
+
+
+@pytest.mark.asyncio
+async def test_create_promo_code_rejects_unknown_package_id():
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[None, None])  # no existing code, then package lookup misses
+    with pytest.raises(BadRequestError, match="No package found"):
+        await create_promo_code(
+            db, CreatePromoCodeRequest(code="X", discount_type="PERCENTAGE", discount_value=90, package_id="ghost-pkg"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_promo_code_rejects_unknown_agency_id():
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[None, None])  # no existing code, then agency lookup misses
+    with pytest.raises(BadRequestError, match="No agency found"):
+        await create_promo_code(
+            db, CreatePromoCodeRequest(code="X", discount_type="PERCENTAGE", discount_value=90, agency_id="ghost-agency"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_promo_code_stores_package_and_agency_scoping():
+    package = SimpleNamespace(id="pkg-1", title="Goa Getaway")
+    db = AsyncMock()
+    # no dup, package found (create-time check), times_used, total_discount,
+    # package found again (response-building lookup for packageTitle)
+    db.scalar = AsyncMock(side_effect=[None, package, 0, 0, package])
+    created = {}
+    db.add = lambda obj: created.__setitem__("promo", obj)
+
+    async def _flush():
+        created["promo"].created_at = datetime.now(UTC)
+
+    db.flush = AsyncMock(side_effect=_flush)
+
+    result = await create_promo_code(
+        db, CreatePromoCodeRequest(code="GOA50", discount_type="PERCENTAGE", discount_value=50, package_id="pkg-1"),
+    )
+
+    assert created["promo"].package_id == "pkg-1"
+    assert result.package_id == "pkg-1"
+    assert result.package_title == "Goa Getaway"

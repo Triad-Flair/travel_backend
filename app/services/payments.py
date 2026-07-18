@@ -558,7 +558,11 @@ async def create_payment_order(
     promo_code = (req.promo_code or "").strip().upper() or None
     promo_discount = 0
     if promo_code:
-        promo, promo_discount, _ = await _resolve_promo_discount(db, promo_code, user_id, gross_amount)
+        promo, promo_discount, _ = await _resolve_promo_discount(
+            db, promo_code, user_id, gross_amount,
+            package_id=ctx["package"].id if ctx["package"] else None,
+            agency_id=ctx["agency"].id if ctx["agency"] else None,
+        )
         if not promo:
             promo_code = None
 
@@ -643,9 +647,14 @@ async def create_payment_order(
 
 
 async def _resolve_promo_discount(
-    db: AsyncSession, code: str, user_id: str, gross_amount: int
+    db: AsyncSession, code: str, user_id: str, gross_amount: int,
+    package_id: str | None = None, agency_id: str | None = None,
 ) -> tuple[PromotionalDiscount | None, int, str]:
     """Look up a promo code and compute its discount against gross_amount (paise).
+
+    package_id/agency_id identify what's actually being checked out —
+    required to enforce a code that's scoped to one specific package
+    and/or one specific agency (NULL on the code itself means unrestricted).
 
     Returns (promo, discount_paise, message) — promo is None (discount 0) for
     any code that doesn't apply, with message explaining why.
@@ -662,6 +671,12 @@ async def _resolve_promo_discount(
 
     if promo.expires_at and promo.expires_at <= datetime.now(UTC):
         return None, 0, "This promo code has expired"
+
+    if promo.package_id and promo.package_id != package_id:
+        return None, 0, "This promo code isn't valid for this package"
+
+    if promo.agency_id and promo.agency_id != agency_id:
+        return None, 0, "This promo code isn't valid for this agency"
 
     if promo.min_order_amount_paise and gross_amount < promo.min_order_amount_paise:
         return None, 0, f"Minimum order amount for this code is ₹{promo.min_order_amount_paise // 100}"
@@ -702,7 +717,11 @@ async def validate_promo(
 ) -> ValidatePromoResponse:
     ctx = await _get_payment_context(db, req.group_id, user_id)
     gross_amount = int(ctx["breakdown"]["totalAmount"])
-    promo, discount_paise, message = await _resolve_promo_discount(db, req.code, user_id, gross_amount)
+    promo, discount_paise, message = await _resolve_promo_discount(
+        db, req.code, user_id, gross_amount,
+        package_id=ctx["package"].id if ctx["package"] else None,
+        agency_id=ctx["agency"].id if ctx["agency"] else None,
+    )
     if not promo:
         return ValidatePromoResponse(
             valid=False,
@@ -735,6 +754,17 @@ async def _promo_to_response(db: AsyncSession, promo: PromotionalDiscount) -> Pr
             PromoCodeUsage.promo_id == promo.id
         )
     ) or 0
+
+    package_title = None
+    if promo.package_id:
+        package = await db.scalar(select(Package).where(Package.id == promo.package_id))
+        package_title = package.title if package else None
+
+    agency_name = None
+    if promo.agency_id:
+        agency = await db.scalar(select(Agency).where(Agency.id == promo.agency_id))
+        agency_name = agency.name if agency else None
+
     return PromoCodeResponse(
         id=promo.id,
         code=promo.code,
@@ -747,6 +777,10 @@ async def _promo_to_response(db: AsyncSession, promo: PromotionalDiscount) -> Pr
         usage_limit=promo.usage_limit,
         per_user_limit=promo.per_user_limit,
         expires_at=promo.expires_at,
+        package_id=promo.package_id,
+        package_title=package_title,
+        agency_id=promo.agency_id,
+        agency_name=agency_name,
         times_used=int(times_used),
         total_discount_given_paise=int(total_discount_given),
         created_at=promo.created_at,
@@ -770,6 +804,15 @@ async def create_promo_code(db: AsyncSession, req: CreatePromoCodeRequest) -> Pr
     if existing:
         raise BadRequestError(f"Promo code '{code}' already exists")
 
+    if req.package_id:
+        package = await db.scalar(select(Package).where(Package.id == req.package_id))
+        if not package:
+            raise BadRequestError("No package found with that ID")
+    if req.agency_id:
+        agency = await db.scalar(select(Agency).where(Agency.id == req.agency_id))
+        if not agency:
+            raise BadRequestError("No agency found with that ID")
+
     promo = PromotionalDiscount(
         id=str(uuid.uuid4()),
         code=code,
@@ -782,6 +825,8 @@ async def create_promo_code(db: AsyncSession, req: CreatePromoCodeRequest) -> Pr
         usage_limit=req.usage_limit,
         per_user_limit=req.per_user_limit,
         expires_at=req.expires_at,
+        package_id=req.package_id,
+        agency_id=req.agency_id,
     )
     db.add(promo)
     await db.flush()

@@ -93,6 +93,12 @@ class PromotionalDiscount(TimestampsMixin, BaseModel):
     usage_limit: Mapped[int | None] = mapped_column("usageLimit", Integer, nullable=True)
     per_user_limit: Mapped[int | None] = mapped_column("perUserLimit", Integer, nullable=True, default=1)
     expires_at: Mapped[datetime | None] = mapped_column("expiresAt", DateTime(timezone=True), nullable=True)
+    # NULL = unrestricted (any package / any agency). Both can be set
+    # together — a code scoped to a specific package is implicitly scoped
+    # to that package's agency too, but agencyId lets an admin restrict a
+    # code to "any package from this agency" without picking one package.
+    package_id: Mapped[str | None] = mapped_column("packageId", String(36), nullable=True)
+    agency_id: Mapped[str | None] = mapped_column("agencyId", String(36), nullable=True)
 
 
 class PromoCodeUsage(BaseModel):

@@ -43,6 +43,8 @@ class CreatePromoCodeRequest(CamelModel):
     usage_limit: int | None = None
     per_user_limit: int | None = 1
     expires_at: datetime | None = None
+    package_id: str | None = None
+    agency_id: str | None = None
 
 
 class PromoCodeResponse(CamelModel):
@@ -57,6 +59,10 @@ class PromoCodeResponse(CamelModel):
     usage_limit: int | None
     per_user_limit: int | None
     expires_at: datetime | None
+    package_id: str | None = None
+    package_title: str | None = None
+    agency_id: str | None = None
+    agency_name: str | None = None
     times_used: int
     total_discount_given_paise: int
     created_at: datetime
