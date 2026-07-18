@@ -10,7 +10,7 @@ from app.services.plans import confirm_plan_with_offer
 
 
 def _fake_package(**overrides):
-    defaults = dict(id="pkg-1", slug="pkg-1-slug", status="OPEN", group_size_max=14)
+    defaults = dict(id="pkg-1", slug="pkg-1-slug", title="Goa Getaway", status="OPEN", group_size_max=14)
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 

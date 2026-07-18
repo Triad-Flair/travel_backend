@@ -13,6 +13,7 @@ from app.models.offer import Offer, OfferNegotiation
 from app.models.package import Package
 from app.models.plan import Plan
 from app.models.user import User
+from app.services import notifications as notif_svc
 
 OPEN_OFFER_STATUSES = ("PENDING", "COUNTERED")
 from app.schemas.common import AgencySummary, UserSummary
@@ -367,6 +368,13 @@ async def accept_offer(db: AsyncSession, offer_id: str, user_id: str) -> OfferRe
     )
     await db.flush()
     await db.refresh(offer)  # see comment in counter_offer re: expired onupdate column
+
+    await notif_svc.create_notification(
+        db, user_id, "group_chat_joined",
+        "You're in the group chat!",
+        f"You now have access to the group chat for {plan.title}.",
+        href=f"/dashboard/messages?groupId={group.id}",
+    )
 
     # PRD trigger: send_group_chat_verification_email
     from app.workers.tasks import send_group_chat_verification_email_task

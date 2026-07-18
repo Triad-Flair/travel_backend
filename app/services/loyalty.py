@@ -13,6 +13,7 @@ from app.models.loyalty import LoyaltyPointsLedger, ReferralLink, ReferralWallet
 from app.models.offer import Offer
 from app.models.plan import Plan
 from app.models.user import User
+from app.services import notifications as notif_svc
 from app.schemas.loyalty import (
     LoyaltyBalanceResponse,
     LoyaltyLedgerEntry,
@@ -265,6 +266,12 @@ async def credit_referral_bonus(
             idempotency_key=f"referral:{referred_user_id}",
             referral_id=referral_link_id,
         )
+    )
+    await notif_svc.create_notification(
+        db, referrer_user_id, "referral_earned",
+        "Referral bonus earned!",
+        f"₹{REFERRAL_BONUS_RUPEES} was added to your wallet — a friend just signed up with your referral code.",
+        href="/dashboard/refer-and-earn",
     )
 
 

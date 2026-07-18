@@ -42,6 +42,12 @@ class GroupMember(BaseModel):
     joined_at: Mapped[datetime | None] = mapped_column("joinedAt", DateTime(timezone=True), nullable=True)
     committed_at: Mapped[datetime | None] = mapped_column("committedAt", DateTime(timezone=True), nullable=True)
     left_at: Mapped[datetime | None] = mapped_column("leftAt", DateTime(timezone=True), nullable=True)
+    # Idempotency guard for send_upcoming_trip_reminders (workers/tasks.py) —
+    # same pattern as Package.expiry_warning_sent_at: without it, a member
+    # who joined a trip starting within the reminder window would get a
+    # fresh "your trip starts soon" notification on every single beat tick
+    # until the trip starts, instead of exactly once.
+    trip_reminder_sent_at: Mapped[datetime | None] = mapped_column("tripReminderSentAt", DateTime(timezone=True), nullable=True)
 
     group = relationship("Group", back_populates="members")
     user = relationship("User", back_populates="group_memberships")

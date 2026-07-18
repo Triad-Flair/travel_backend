@@ -17,6 +17,7 @@ from app.models.package import Package
 from app.models.plan import Plan
 from app.models.social import Review
 from app.models.user import User
+from app.services import notifications as notif_svc
 from app.schemas.base import CamelModel
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
@@ -364,6 +365,22 @@ async def submit_review_endpoint(
     target_agency = await db.scalar(select(Agency).where(Agency.id == review.target_agency_id)) if review.target_agency_id else None
     if not reviewer:
         raise NotFoundError("Reviewer")
+
+    reviewer_name = reviewer.display_name or reviewer.username or "A traveler"
+    if target_agency and target_agency.owner_id:
+        await notif_svc.create_notification(
+            db, target_agency.owner_id, "review_received",
+            "New review received",
+            f"{reviewer_name} left a {review.overall_rating}★ review for {target_agency.name}.",
+            href="/agency/storefront",
+        )
+    if target_user:
+        await notif_svc.create_notification(
+            db, target_user.id, "review_received",
+            "New review received",
+            f"{reviewer_name} left you a {review.overall_rating}★ review.",
+            href="/dashboard/profile",
+        )
 
     # PRD trigger: send_review_alert_email — notify whoever was reviewed.
     from app.workers.tasks import send_review_alert_email_task

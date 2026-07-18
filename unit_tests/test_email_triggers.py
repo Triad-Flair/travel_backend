@@ -45,7 +45,7 @@ async def test_submit_review_endpoint_dispatches_review_alert_email():
         id="agency-1", name="Test Agency", slug="test-agency", logo_url=None, description=None,
         verification_status="verified", gstin=None, pan=None, tourism_license=None, address=None,
         phone=None, email=None, city=None, state=None, specializations=None, destinations=None,
-        avg_rating=0.0, review_count=0, total_trips=0,
+        avg_rating=0.0, review_count=0, total_trips=0, owner_id="agency-owner-1",
     )
     reviewer = SimpleNamespace(
         id="user-1", display_name="Reviewer", username="reviewer", avatar_url=None,

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.models.loyalty import ReferralWalletTransaction
 from app.services.payments import _finalize_capture
 
 
@@ -39,14 +40,16 @@ async def test_debits_wallet_balance_and_records_transaction():
     # Call order: wallet lookup, idempotency check (no existing tx), then
     # member lookup, then group lookup (None short-circuits the rest).
     db.scalar = AsyncMock(side_effect=[wallet, None, None, None])
-    added = {}
-    db.add = lambda obj: added.__setitem__("tx", obj)
+    added = []
+    db.add = lambda obj: added.append(obj)
 
     await _finalize_capture(db, payment)
 
     assert wallet.balance == 250 - 22
     assert wallet.total_spent == 22
-    tx = added["tx"]
+    transactions = [a for a in added if isinstance(a, ReferralWalletTransaction)]
+    assert len(transactions) == 1
+    tx = transactions[0]
     assert tx.type == "checkout_spent"
     assert tx.amount == -22
     assert tx.idempotency_key == "checkout:payment-1"

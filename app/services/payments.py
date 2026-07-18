@@ -37,6 +37,7 @@ from app.schemas.payments import (
     VerifyPaymentRequest,
 )
 from app.services import invoices as inv_svc
+from app.services import notifications as notif_svc
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,13 @@ async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> Non
     agency = ctx["agency"]
 
     traveler = await db.scalar(select(User).where(User.id == payment.user_id))
+    if traveler and trip:
+        await notif_svc.create_notification(
+            db, payment.user_id, "payment_captured",
+            "Payment successful",
+            f"Your payment for {trip.title} was captured. Your booking is confirmed.",
+            href=f"/dashboard/invoices/{payment.id}",
+        )
     if traveler and traveler.email and trip:
         # PRD trigger: send_transactional_invoice_email — routed through
         # Celery (see app/workers/tasks.py) rather than a direct await. The
@@ -114,6 +122,13 @@ async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> Non
 
     if agency and agency.owner_id and trip:
         owner = await db.scalar(select(User).where(User.id == agency.owner_id))
+        if owner:
+            await notif_svc.create_notification(
+                db, agency.owner_id, "payment_captured",
+                "New booking payment received",
+                f"A traveler just paid for {trip.title}.",
+                href=f"/agency/invoices/{payment.id}",
+            )
         if owner and owner.email:
             await send_agency_booking_invoice_email(
                 owner.email,
@@ -306,6 +321,12 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
                         idempotency_key=f"checkout:{payment.id}",
                         payment_id=payment.id,
                     )
+                )
+                await notif_svc.create_notification(
+                    db, payment.user_id, "wallet_balance_changed",
+                    "Wallet credit used",
+                    f"₹{wallet_used} of your wallet balance was used at checkout. Remaining balance: ₹{wallet.balance}.",
+                    href="/dashboard/wallet",
                 )
 
     member = await db.scalar(

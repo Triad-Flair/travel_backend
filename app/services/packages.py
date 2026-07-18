@@ -24,6 +24,7 @@ from app.schemas.packages import (
     UpdatePackageRequest,
 )
 from app.schemas.plans import GroupMemberSummary, GroupSummary
+from app.services import notifications as notif_svc
 
 ACTIVE_MEMBER_STATUSES = ("APPROVED", "COMMITTED")
 
@@ -477,6 +478,13 @@ async def book_package(db: AsyncSession, pkg_id: str, user_id: str) -> GroupSumm
     group.current_size = (group.current_size or 0) + 1
     await db.flush()
     await invalidate(CacheKeys.package_detail(pkg.slug))
+
+    await notif_svc.create_notification(
+        db, user_id, "group_chat_joined",
+        "You're in the group chat!",
+        f"You now have access to the group chat for {pkg.title}.",
+        href=f"/dashboard/messages?groupId={group.id}",
+    )
 
     # PRD trigger: send_group_chat_verification_email
     from app.workers.tasks import send_group_chat_verification_email_task

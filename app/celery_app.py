@@ -48,6 +48,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.reconcile_stuck_group_confirmations",
             "schedule": crontab(minute="*/15"),
         },
+        "send-upcoming-trip-reminders": {
+            "task": "app.workers.tasks.send_upcoming_trip_reminders",
+            "schedule": crontab(hour=9, minute=30),
+        },
         # Package view counters live in Redis — no periodic DB flush needed
         # (views are read directly from Redis via GET pkg:views:{id}).
         # Add a flush task here if you later add a `view_count` DB column.

@@ -18,23 +18,35 @@ def _run_async(coro):
 @celery_app.task(name="app.workers.tasks.check_expired_plans", bind=True, max_retries=3)
 def check_expired_plans(self):
     async def _task():
-        from sqlalchemy import select, update
+        from sqlalchemy import select
         from app.database import AsyncSessionLocal
         from app.models.plan import Plan
         from app.models.enums import PlanStatus
+        from app.services.notifications import create_notification
 
         now = datetime.now(UTC)
         async with AsyncSessionLocal() as db:
-            await db.execute(
-                update(Plan)
-                .where(
+            # Selected (not a bulk UPDATE) so each creator can be notified —
+            # previously this was a silent bulk UPDATE with no email, no
+            # in-app notification, nothing telling the creator their plan
+            # had expired.
+            rows = await db.execute(
+                select(Plan).where(
                     Plan.status == PlanStatus.OPEN,
                     Plan.expires_at <= now,
                 )
-                .values(status=PlanStatus.EXPIRED)
             )
+            expired_plans = rows.scalars().all()
+            for plan in expired_plans:
+                plan.status = PlanStatus.EXPIRED
+                await create_notification(
+                    db, plan.creator_id, "plan_expired",
+                    "Your plan expired",
+                    f'"{plan.title}" expired before enough travelers joined.',
+                    href=f"/plans/{plan.slug}",
+                )
             await db.commit()
-            logger.info("Expired plans job completed at %s", now)
+            logger.info("Expired plans job completed at %s (%d expired)", now, len(expired_plans))
 
     try:
         _run_async(_task())
@@ -645,3 +657,86 @@ def send_group_chat_verification_email_task(self, user_id: str, group_id: str):
     except Exception as exc:
         logger.error("send_group_chat_verification_email failed for user %s / group %s: %s", user_id, group_id, exc)
         raise self.retry(exc=exc, countdown=30)
+
+
+@celery_app.task(name="app.workers.tasks.send_upcoming_trip_reminders", bind=True, max_retries=3)
+def send_upcoming_trip_reminders(self, window_days: int = 3):
+    """Beat-scheduled — finds every active group member whose trip starts
+    within window_days and hasn't been reminded yet (tripReminderSentAt).
+    Two different notifications depending on whether the member has
+    actually paid: a COMMITTED member gets a "pack your bags" nudge, an
+    INTERESTED/APPROVED member — who joined but never completed checkout —
+    gets a "complete your payment before the trip starts" reminder, since
+    Group.paymentWindowEndsAt is never actually set anywhere in this
+    codebase and can't be used as a real deadline."""
+    async def _task():
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.database import AsyncSessionLocal
+        from app.models.group import Group, GroupMember
+        from app.models.package import Package
+        from app.models.plan import Plan
+        from app.services.notifications import create_notification
+
+        now = datetime.now(UTC)
+        cutoff = now + timedelta(days=window_days)
+
+        async with AsyncSessionLocal() as db:
+            plan_rows = await db.execute(
+                select(GroupMember, Group, Plan)
+                .join(Group, Group.id == GroupMember.group_id)
+                .join(Plan, Plan.id == Group.plan_id)
+                .where(
+                    GroupMember.status.in_(["INTERESTED", "APPROVED", "COMMITTED"]),
+                    GroupMember.trip_reminder_sent_at.is_(None),
+                    Plan.start_date.isnot(None),
+                    Plan.start_date > now,
+                    Plan.start_date <= cutoff,
+                    Plan.status.in_(["CONFIRMING", "CONFIRMED"]),
+                )
+            )
+            package_rows = await db.execute(
+                select(GroupMember, Group, Package)
+                .join(Group, Group.id == GroupMember.group_id)
+                .join(Package, Package.id == Group.package_id)
+                .where(
+                    GroupMember.status.in_(["INTERESTED", "APPROVED", "COMMITTED"]),
+                    GroupMember.trip_reminder_sent_at.is_(None),
+                    Package.start_date.isnot(None),
+                    Package.start_date > now,
+                    Package.start_date <= cutoff,
+                    Package.status.in_(["CONFIRMING", "CONFIRMED"]),
+                )
+            )
+
+            reminded = 0
+            for member, group, trip in [*plan_rows.all(), *package_rows.all()]:
+                member.trip_reminder_sent_at = now
+                days_left = max(1, (trip.start_date - now).days)
+                when = "tomorrow" if days_left == 1 else f"in {days_left} days"
+                if member.status == "COMMITTED":
+                    await create_notification(
+                        db, member.user_id, "trip_starting_soon",
+                        "Your trip is coming up!",
+                        f'"{trip.title}" starts {when} — start packing!',
+                        href=f"/dashboard/groups/{group.id}/chat",
+                    )
+                else:
+                    await create_notification(
+                        db, member.user_id, "payment_due_reminder",
+                        "Complete your payment",
+                        f'"{trip.title}" starts {when} and you haven\'t completed payment yet — confirm your spot before it fills up.',
+                        href=f"/dashboard/groups/{group.id}/checkout",
+                    )
+                reminded += 1
+
+            await db.commit()
+            logger.info("Upcoming trip reminders sent to %d member(s) at %s", reminded, now)
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        logger.error("send_upcoming_trip_reminders failed: %s", exc)
+        raise self.retry(exc=exc, countdown=300)

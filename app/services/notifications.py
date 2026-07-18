@@ -1,4 +1,6 @@
 import json
+import logging
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import and_, func, select, update
@@ -7,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.social import Notification, ProfileView
 from app.models.user import User
 from app.schemas.notifications import NotificationResponse, ProfileViewResponse
+
+logger = logging.getLogger(__name__)
 
 
 def _maybe_dt(value) -> datetime | None:
@@ -44,6 +48,67 @@ def _notif_to_response(n: Notification) -> NotificationResponse:
         read_at=read_at,
         created_at=n.created_at,
     )
+
+
+async def create_notification(
+    db: AsyncSession,
+    user_id: str,
+    type: str,
+    title: str,
+    body: str,
+    href: str | None = None,
+    metadata: dict | None = None,
+) -> Notification:
+    """Central place to create an in-app Notification row — before this
+    existed, every event type except "new follower" and a chat compliance
+    reminder had no notification path at all (purchases, referrals, wallet
+    changes, reviews, group-join, expiry/reminders all only ever sent, at
+    best, a one-off transactional email). Also pushes a live
+    "notification:created" socket event so the bell dropdown updates
+    without a page reload — the frontend already listened for this event
+    (use-live-notifications.ts), but nothing on the backend ever emitted
+    it, so live push silently never worked.
+
+    The socket push is best-effort: a Redis/socket hiccup must never take
+    down whatever business transaction (payment capture, referral credit,
+    etc.) triggered this notification, so it's caught and logged, not
+    re-raised."""
+    notif_id = str(uuid.uuid4())
+    created_at = datetime.now(UTC)
+    notif = Notification(
+        id=notif_id,
+        user_id=user_id,
+        type=type,
+        title=title,
+        body=body,
+        href=href,
+        extra_data=metadata,
+    )
+    db.add(notif)
+    await db.flush()
+
+    try:
+        from app.websockets.socketio_server import emit_to_user
+        # Built directly rather than via _notif_to_response(notif) — that
+        # reads notif.created_at, which depends on the flush actually
+        # having run against a real database (server_default=func.now()).
+        # This push is best-effort and ephemeral, so it shouldn't depend on
+        # that at all; every value it needs is already known here.
+        await emit_to_user(user_id, "notification:created", {
+            "id": notif_id,
+            "type": type,
+            "title": title,
+            "body": body,
+            "href": href,
+            "metadata": metadata,
+            "read": False,
+            "readAt": None,
+            "createdAt": created_at.isoformat(),
+        })
+    except Exception:
+        logger.exception("Failed to push live notification %s to user %s", notif_id, user_id)
+
+    return notif
 
 
 async def list_notifications(

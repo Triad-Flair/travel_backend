@@ -156,13 +156,17 @@ async def get_discover_feed(
 
     raw_plans: list[Plan] = []
     raw_pkgs: list[Package] = []
-    half = filters.page_size // 2
     offset = (filters.page - 1) * filters.page_size
 
     show_packages = not requesting_agency_id
 
     if filters.origin_type in (None, "plan"):
-        q = select(Plan).options(selectinload(Plan.creator)).where(Plan.status == 'OPEN')
+        # CONFIRMING (not just OPEN) — a plan flips to CONFIRMING the moment
+        # its first traveler pays (see payments.py::check_and_confirm_group),
+        # which used to make it vanish from Discover/Search/Following even
+        # though the group is still open and joinable. Packages already
+        # included CONFIRMING here; plans didn't.
+        q = select(Plan).options(selectinload(Plan.creator)).where(Plan.status.in_(['OPEN', 'CONFIRMING']))
         if requesting_agency_id:
             if filters.plan_type:
                 q = q.where(Plan.plan_type == filters.plan_type)
@@ -177,6 +181,10 @@ async def get_discover_feed(
             q = q.where(Plan.budget_max >= filters.budget_min)
         if filters.budget_max:
             q = q.where(Plan.budget_min <= filters.budget_max)
+        if filters.vibes:
+            q = q.where(Plan.vibes.contains([filters.vibes]))
+        if filters.group_type:
+            q = q.where(Plan.group_type == filters.group_type)
         sort = filters.sort or "recent"
         if sort == "price_low":
             q = q.order_by(Plan.budget_min.asc().nullslast())
@@ -184,9 +192,12 @@ async def get_discover_feed(
             q = q.order_by(Plan.budget_max.desc().nullslast())
         else:
             q = q.order_by(Plan.created_at.desc())
-        # An agency viewer gets no package results at all (see show_packages
-        # below), so give the plan query the full page rather than half.
-        limit = filters.page_size if (filters.origin_type == "plan" or not show_packages) else half
+        # Fetch a full page from each side (not half-each) and let the
+        # interleave-then-trim step below backfill from whichever side has
+        # more inventory — previously capping both sides at page_size // 2
+        # meant an empty/thin package catalog silently starved the whole
+        # feed instead of filling the gap with more plans.
+        limit = filters.page_size
         off = offset if (filters.origin_type == "plan" or not show_packages) else 0
         result = await db.execute(q.offset(off).limit(limit))
         raw_plans = list(result.scalars().all())
@@ -199,6 +210,8 @@ async def get_discover_feed(
             q = q.where(Package.price_per_person >= filters.budget_min)
         if filters.budget_max:
             q = q.where(Package.price_per_person <= filters.budget_max)
+        if filters.vibes:
+            q = q.where(Package.vibes.contains([filters.vibes]))
         sort = filters.sort or "popular"
         if sort == "price_low":
             q = q.order_by(Package.price_per_person.asc())
@@ -206,7 +219,7 @@ async def get_discover_feed(
             q = q.order_by(Package.price_per_person.desc())
         else:
             q = q.order_by(Package.created_at.desc())
-        limit = filters.page_size if filters.origin_type == "package" else half
+        limit = filters.page_size
         off = offset if filters.origin_type == "package" else 0
         result = await db.execute(q.offset(off).limit(limit))
         raw_pkgs = list(result.scalars().all())
@@ -271,22 +284,29 @@ async def search(
     show_packages = not requesting_agency_id
 
     plan_conditions = [
-        Plan.status == 'OPEN',
+        Plan.status.in_(['OPEN', 'CONFIRMING']),
         (Plan.title.ilike(term) | Plan.destination.ilike(term)),
     ]
     if not requesting_agency_id:
         # Corporate plans are private — never surfaced in search to other travelers.
         plan_conditions.append(Plan.plan_type == 'STANDARD')
 
+    plan_items: list[DiscoverItem] = []
+    pkg_items: list[DiscoverItem] = []
+
+    # Fetch a full page_size from each side rather than splitting page_size
+    # in half up front — otherwise a thin package catalog silently starves
+    # plan results (and vice versa) instead of the abundant side backfilling
+    # the gap, same fix as get_discover_feed above.
     plan_result = await db.execute(
         select(Plan)
         .options(selectinload(Plan.creator))
         .where(*plan_conditions)
         .order_by(Plan.created_at.desc())
-        .limit(page_size if not show_packages else page_size // 2)
+        .limit(page_size)
     )
     for plan in plan_result.scalars().all():
-        items.append(_plan_to_discover(plan))
+        plan_items.append(_plan_to_discover(plan))
 
     if show_packages:
         pkg_result = await db.execute(
@@ -297,12 +317,18 @@ async def search(
                 (Package.title.ilike(term) | Package.destination.ilike(term)),
             )
             .order_by(Package.created_at.desc())
-            .limit(page_size // 2)
+            .limit(page_size)
         )
         for pkg in pkg_result.scalars().all():
-            items.append(_pkg_to_discover(pkg))
+            pkg_items.append(_pkg_to_discover(pkg))
 
-    return items
+    for i in range(max(len(plan_items), len(pkg_items))):
+        if i < len(plan_items):
+            items.append(plan_items[i])
+        if i < len(pkg_items):
+            items.append(pkg_items[i])
+
+    return items[:page_size]
 
 
 async def get_following_feed(
@@ -327,7 +353,7 @@ async def get_following_feed(
     if filters.origin_type in (None, "plan") and followed_user_ids:
         plan_query = select(Plan).where(
             Plan.creator_id.in_(followed_user_ids),
-            Plan.status == "OPEN",
+            Plan.status.in_(["OPEN", "CONFIRMING"]),
         )
         if filters.destination:
             plan_query = plan_query.where(Plan.destination.ilike(f"%{filters.destination}%"))

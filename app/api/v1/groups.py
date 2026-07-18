@@ -16,6 +16,7 @@ from app.schemas.offers import OfferResponse, SubmitOfferRequest
 from app.schemas.groups import GroupMemberResponse, GroupMembersPayload, InviteMemberRequest, TripMembershipResponse
 from app.schemas.common import UserSummary
 from app.services import offers as offer_svc
+from app.services import notifications as notif_svc
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -69,6 +70,24 @@ def _package_payload(package: Package | None) -> dict | None:
         "galleryUrls": package.gallery_urls,
         "basePrice": package.price_per_person,
     }
+
+
+async def _notify_joined_group_chat(db: AsyncSession, group_id: str, user_id: str) -> None:
+    """Fired the moment a membership actually grants chat access (APPROVED),
+    not on a plain join REQUEST (INTERESTED) — see the comment on
+    approve_member for why those are different moments."""
+    group = await db.scalar(select(Group).where(Group.id == group_id))
+    if not group:
+        return
+    plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id)) if group.plan_id else None
+    package = await db.scalar(select(Package).where(Package.id == group.package_id)) if group.package_id else None
+    title = (plan or package).title if (plan or package) else "your trip"
+    await notif_svc.create_notification(
+        db, user_id, "group_chat_joined",
+        "You're in the group chat!",
+        f"You now have access to the group chat for {title}.",
+        href=f"/dashboard/messages?groupId={group.id}",
+    )
 
 
 async def _group_payload(db: AsyncSession, group: Group) -> dict:
@@ -325,6 +344,7 @@ async def approve_member(
     if not member.joined_at:
         member.joined_at = datetime.now(UTC)
     await db.flush()
+    await _notify_joined_group_chat(db, group_id, user_id)
 
     # PRD trigger: send_group_chat_verification_email — fired here, not in
     # join_group, because INTERESTED (join_group's status) doesn't actually
@@ -408,6 +428,7 @@ async def invite_member(
 
     await _update_group_size(db, group_id, 1)
     await db.flush()
+    await _notify_joined_group_chat(db, group_id, req.user_id)
 
     user = await db.get(User, member.user_id)
     return GroupMemberResponse(
