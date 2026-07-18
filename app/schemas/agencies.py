@@ -1,6 +1,10 @@
+from typing import Literal
+
 from pydantic import Field
 
 from app.schemas.base import CamelModel
+
+AgencyOperationalStatus = Literal["PENDING", "APPROVED", "REJECTED", "PAUSED", "SUSPENDED"]
 
 
 class AgencyProfile(CamelModel):
@@ -116,3 +120,59 @@ class InsuranceQuoteRequest(CamelModel):
     start_date: str
     end_date: str
     group_id: str | None = None
+
+
+class AgencyVerificationFlags(CamelModel):
+    name: bool
+    email: bool
+    phone: bool
+    bank_details: bool
+    gst: bool
+    pan: bool
+    travel_license: bool
+
+
+class AgencyBankDetailsBrief(CamelModel):
+    """Masked — the same convention get_bank_record already uses (never the
+    raw account number)."""
+    account_holder_name: str | None = None
+    bank_name: str | None = None
+    masked_account_number: str | None = None
+    ifsc_code: str | None = None
+
+
+class AgencyAdminDirectoryItem(CamelModel):
+    """One row of the Super Admin Dashboard's agency directory — the brief
+    details PRD calls for (name/email/phone/bankDetails/gst/pan/
+    travelLicense) plus the operational status and per-field verification
+    checklist that drives the review drawer."""
+    id: str
+    name: str
+    slug: str
+    email: str | None = None
+    phone: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    tourism_license: str | None = None
+    bank_details: AgencyBankDetailsBrief | None = None
+    status: AgencyOperationalStatus
+    verification_flags: AgencyVerificationFlags
+    all_flags_verified: bool
+    created_at: str
+
+
+class UpdateVerificationFlagsRequest(CamelModel):
+    """Partial — only the flags present in the request body are changed,
+    everything else on the agency's checklist is left as-is."""
+    name: bool | None = None
+    email: bool | None = None
+    phone: bool | None = None
+    bank_details: bool | None = None
+    gst: bool | None = None
+    pan: bool | None = None
+    travel_license: bool | None = None
+
+
+class UpdateAgencyStatusRequest(CamelModel):
+    status: AgencyOperationalStatus
+    reason: str | None = None

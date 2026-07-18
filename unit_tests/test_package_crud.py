@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.exceptions import BadRequestError
 from app.schemas.packages import CreatePackageRequest, UpdatePackageRequest
 from app.services.packages import create_package, publish_package, update_package
 
@@ -33,7 +34,7 @@ from app.services.packages import create_package, publish_package, update_packag
 def _fake_agency(**overrides):
     defaults = dict(
         id="agency-1", name="Test Agency", slug="test-agency", logo_url=None,
-        description=None, verification_status="VERIFIED", phone=None, email=None,
+        description=None, verification_status="VERIFIED", status="APPROVED", phone=None, email=None,
         city=None, state=None, avg_rating=4.5, review_count=10, total_trips=3,
     )
     defaults.update(overrides)
@@ -181,3 +182,20 @@ async def test_publish_package_refreshes_pkg_after_flush_to_avoid_expired_attrib
     db.refresh.assert_awaited_once_with(pkg)
     assert details.status == "OPEN"
     assert pkg.status == "OPEN"
+
+
+@pytest.mark.asyncio
+async def test_publish_package_blocked_when_agency_not_approved():
+    """Super Admin Dashboard guardrail: an agency must be APPROVED before
+    any of its packages can go live, regardless of the package's own
+    DRAFT->OPEN transition being otherwise valid."""
+    pkg = _fake_package(status="DRAFT", agency=_fake_agency(status="PENDING"))
+    db = AsyncMock()
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none = MagicMock(return_value=pkg)
+    db.execute = AsyncMock(return_value=execute_result)
+
+    with pytest.raises(BadRequestError, match="approved"):
+        await publish_package(db, "pkg-1", "agency-1")
+
+    assert pkg.status == "DRAFT"  # unchanged

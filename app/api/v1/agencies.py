@@ -4,11 +4,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user, get_optional_user
 from app.schemas.agencies import (
+    AgencyAdminDirectoryItem,
     CreateAgencyRequest,
     GstVerifyResponse,
     IfscLookupResponse,
     InviteMemberRequest,
     UpdateAgencyRequest,
+    UpdateAgencyStatusRequest,
+    UpdateVerificationFlagsRequest,
 )
 from app.services import agencies as ag_svc
 
@@ -116,6 +119,40 @@ async def reject_verification(
 ):
     current_user.require_admin()
     return await ag_svc.reject_verification(db, agency_id, payload.get("reason"))
+
+
+@router.get("/admin/directory", response_model=list[AgencyAdminDirectoryItem])
+async def admin_agency_directory(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Super Admin Dashboard — every registered agency with brief details
+    (name/email/phone/bankDetails/gst/pan/travelLicense) plus operational
+    status and the per-field verification checklist."""
+    current_user.require_admin()
+    return await ag_svc.list_all_agencies_admin(db)
+
+
+@router.patch("/admin/{agency_id}/verification-flags", response_model=AgencyAdminDirectoryItem)
+async def admin_update_verification_flags(
+    agency_id: str,
+    req: UpdateVerificationFlagsRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await ag_svc.set_verification_flags(db, agency_id, req.model_dump(exclude_unset=True))
+
+
+@router.patch("/admin/{agency_id}/status", response_model=AgencyAdminDirectoryItem)
+async def admin_update_agency_status(
+    agency_id: str,
+    req: UpdateAgencyStatusRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await ag_svc.update_agency_operational_status(db, agency_id, req.status, req.reason)
 
 
 @router.get("/{agency_id}/bank")

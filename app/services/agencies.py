@@ -20,7 +20,10 @@ from app.models.agency import Agency, AgencyBankAccount, AgencyMember, AgencyWal
 from app.models.social import Review
 from app.models.user import User
 from app.schemas.agencies import (
+    AgencyAdminDirectoryItem,
+    AgencyBankDetailsBrief,
     AgencyProfile,
+    AgencyVerificationFlags,
     CreateAgencyRequest,
     GstVerifyResponse,
     IfscLookupResponse,
@@ -463,6 +466,121 @@ async def reject_verification(db: AsyncSession, agency_id: str, reason: str | No
     await db.flush()
     await invalidate(CacheKeys.agency_by_slug(agency.slug))
     return _agency_to_summary(agency)
+
+
+_ALL_VERIFICATION_FLAGS = (
+    "name_verified", "email_verified", "phone_verified", "bank_details_verified",
+    "gst_verified", "pan_verified", "travel_license_verified",
+)
+
+
+def _agency_all_flags_verified(agency: Agency) -> bool:
+    return all(getattr(agency, flag) for flag in _ALL_VERIFICATION_FLAGS)
+
+
+async def _agency_to_admin_directory_item(db: AsyncSession, agency: Agency) -> AgencyAdminDirectoryItem:
+    bank = await db.scalar(select(AgencyBankAccount).where(AgencyBankAccount.agency_id == agency.id))
+    bank_details = None
+    if bank:
+        bank_details = AgencyBankDetailsBrief(
+            account_holder_name=bank.account_holder_name,
+            bank_name=bank.bank_name,
+            masked_account_number=_mask_account(bank.account_number_encrypted),
+            ifsc_code=bank.ifsc_code,
+        )
+
+    return AgencyAdminDirectoryItem(
+        id=agency.id,
+        name=agency.name,
+        slug=agency.slug,
+        email=agency.email,
+        phone=agency.phone,
+        gstin=agency.gstin,
+        pan=agency.pan,
+        tourism_license=agency.tourism_license,
+        bank_details=bank_details,
+        status=agency.status,
+        verification_flags=AgencyVerificationFlags(
+            name=agency.name_verified,
+            email=agency.email_verified,
+            phone=agency.phone_verified,
+            bank_details=agency.bank_details_verified,
+            gst=agency.gst_verified,
+            pan=agency.pan_verified,
+            travel_license=agency.travel_license_verified,
+        ),
+        all_flags_verified=_agency_all_flags_verified(agency),
+        created_at=agency.created_at.isoformat(),
+    )
+
+
+async def list_all_agencies_admin(db: AsyncSession) -> list[AgencyAdminDirectoryItem]:
+    """Admin-only (see require_admin() in app/api/v1/agencies.py). Backs the
+    Super Admin Dashboard's agency directory — every agency, not just the
+    ones currently under_review (that's list_pending_verification_agencies,
+    a separate/older queue kept as-is)."""
+    result = await db.execute(select(Agency).order_by(Agency.created_at.desc()))
+    agencies = result.scalars().all()
+    return [await _agency_to_admin_directory_item(db, a) for a in agencies]
+
+
+async def set_verification_flags(
+    db: AsyncSession, agency_id: str, flags: dict[str, bool]
+) -> AgencyAdminDirectoryItem:
+    """Admin-only. `flags` keys are the camelCase-free field names from
+    AgencyVerificationFlags (name/email/phone/bankDetails/gst/pan/
+    travelLicense) with only the keys the caller actually wants to change
+    present — a partial update, not a full replace."""
+    agency = await db.scalar(select(Agency).where(Agency.id == agency_id))
+    if not agency:
+        raise NotFoundError("Agency")
+
+    field_map = {
+        "name": "name_verified",
+        "email": "email_verified",
+        "phone": "phone_verified",
+        "bank_details": "bank_details_verified",
+        "gst": "gst_verified",
+        "pan": "pan_verified",
+        "travel_license": "travel_license_verified",
+    }
+    for key, value in flags.items():
+        if value is None or key not in field_map:
+            continue
+        setattr(agency, field_map[key], bool(value))
+
+    await db.flush()
+    await invalidate(CacheKeys.agency_by_slug(agency.slug))
+    return await _agency_to_admin_directory_item(db, agency)
+
+
+async def update_agency_operational_status(
+    db: AsyncSession, agency_id: str, new_status: str, reason: str | None = None
+) -> AgencyAdminDirectoryItem:
+    """Admin-only. Approving requires every verification flag to already be
+    true — the "Final Approve" button is disabled client-side until then,
+    but that's a UI nicety, not a security boundary; this is the real
+    guardrail. Every other transition (REJECTED/PAUSED/SUSPENDED/back to
+    PENDING) has no such prerequisite."""
+    agency = await db.scalar(select(Agency).where(Agency.id == agency_id))
+    if not agency:
+        raise NotFoundError("Agency")
+
+    if new_status == "APPROVED" and not _agency_all_flags_verified(agency):
+        raise BadRequestError(
+            "Cannot approve — every verification flag (name, email, phone, "
+            "bank details, GST, PAN, travel license) must be verified first."
+        )
+
+    agency.status = new_status
+    if new_status == "REJECTED":
+        agency.verification_rejection_reason = reason
+    elif new_status == "APPROVED":
+        agency.verification_rejection_reason = None
+
+    await db.flush()
+    await invalidate(CacheKeys.agency_by_slug(agency.slug))
+    return await _agency_to_admin_directory_item(db, agency)
 
 
 def _mask_account(account: str) -> str:

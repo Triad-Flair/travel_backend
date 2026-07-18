@@ -30,6 +30,20 @@ class Agency(TimestampsMixin, BaseModel):
     destinations: Mapped[list | dict | None] = mapped_column("destinations", JSONB, nullable=True)
     verification_status: Mapped[str] = mapped_column("verification", String(30), default="pending", nullable=False)
     verification_rejection_reason: Mapped[str | None] = mapped_column("verificationRejectionReason", Text, nullable=True)
+    # Operational gate for the Super Admin Dashboard — deliberately separate
+    # from verification_status above (that's the existing KYC/GST review
+    # flow). status governs whether an agency may operate on the platform
+    # at all (see publish_package's guardrail); the *Verified booleans are
+    # the individual checklist items an admin ticks off before APPROVED
+    # becomes reachable.
+    status: Mapped[str] = mapped_column("status", String(20), default="PENDING", nullable=False)
+    name_verified: Mapped[bool] = mapped_column("nameVerified", Boolean, default=False, nullable=False)
+    email_verified: Mapped[bool] = mapped_column("emailVerified", Boolean, default=False, nullable=False)
+    phone_verified: Mapped[bool] = mapped_column("phoneVerified", Boolean, default=False, nullable=False)
+    bank_details_verified: Mapped[bool] = mapped_column("bankDetailsVerified", Boolean, default=False, nullable=False)
+    gst_verified: Mapped[bool] = mapped_column("gstVerified", Boolean, default=False, nullable=False)
+    pan_verified: Mapped[bool] = mapped_column("panVerified", Boolean, default=False, nullable=False)
+    travel_license_verified: Mapped[bool] = mapped_column("travelLicenseVerified", Boolean, default=False, nullable=False)
     avg_rating: Mapped[float] = mapped_column("avgRating", Float, default=0.0, nullable=False)
     review_count: Mapped[int] = mapped_column("totalReviews", Integer, default=0, nullable=False)
     total_trips: Mapped[int] = mapped_column("totalTrips", Integer, default=0, nullable=False)

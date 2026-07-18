@@ -395,6 +395,10 @@ async def publish_package(db: AsyncSession, pkg_id: str, agency_id: str) -> Pack
         raise NotFoundError("Package")
     if pkg.agency_id != agency_id:
         raise ForbiddenError()
+    if pkg.agency and pkg.agency.status != "APPROVED":
+        raise BadRequestError(
+            "Your agency must be approved by the platform before you can publish packages."
+        )
     pkg.status = "OPEN"
     await db.flush()
     # See the onupdate=func.now() / MissingGreenlet comment in update_package.
