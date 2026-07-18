@@ -22,7 +22,7 @@ from app.services.payments import _finalize_capture
 def _fake_payment(**overrides):
     defaults = dict(
         id="payment-1", user_id="user-1", group_id="group-1",
-        promo_code="WELCOME90", promo_discount_amount=45000,
+        promo_code="WELCOME90", promo_discount_amount=45000, wallet_amount_used=0,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
