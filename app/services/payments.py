@@ -334,20 +334,39 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
     if not group:
         return
 
+    await inv_svc._ensure_invoice(db, payment)
+    await db.flush()
+    await _send_capture_notifications(db, payment)
+
+    await check_and_confirm_group(db, group)
+
+
+async def check_and_confirm_group(db: AsyncSession, group: Group) -> bool:
+    """Flips the group's plan/package to CONFIRMED and auto-releases
+    tranche1 once every required traveler has a captured payment. Shared
+    by _finalize_capture (the real-time path, called on every capture) and
+    reconcile_stuck_group_confirmations (a periodic safety net) — confirmed
+    live that the real-time path can occasionally miss this on its own
+    (root cause not conclusively identified; re-running this exact
+    computation against the same data afterward correctly detected the
+    group as confirmable, meaning the check itself is sound and this is
+    most likely a one-off transaction-timing issue rather than a logic
+    bug). Idempotent: does nothing if the plan/package is already
+    CONFIRMED. Returns True if it just confirmed the trip."""
     members_rows = await db.execute(
         select(GroupMember).where(
-            GroupMember.group_id == payment.group_id,
+            GroupMember.group_id == group.id,
             GroupMember.status.in_(ACTIVE_MEMBER_STATUSES),
         )
     )
     members = members_rows.scalars().all()
     member_user_ids = [m.user_id for m in members]
     if not member_user_ids:
-        return
+        return False
 
     captured_count = await db.scalar(
         select(func.count(Payment.id)).where(
-            Payment.group_id == payment.group_id,
+            Payment.group_id == group.id,
             Payment.user_id.in_(member_user_ids),
             Payment.status == "CAPTURED",
         )
@@ -357,7 +376,7 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
 
     if group.plan_id:
         plan = await db.scalar(select(Plan).where(Plan.id == group.plan_id))
-        if plan:
+        if plan and plan.status != "CONFIRMED":
             min_required = max(1, int(plan.group_size_min or 1))
             if int(captured_count) >= min_required and int(captured_count) == len(member_user_ids):
                 plan.status = "CONFIRMED"
@@ -368,7 +387,7 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
 
     if group.package_id:
         package = await db.scalar(select(Package).where(Package.id == group.package_id))
-        if package:
+        if package and package.status != "CONFIRMED":
             min_required = max(1, int(package.group_size_min or 1))
             if int(captured_count) >= min_required and int(captured_count) == len(member_user_ids):
                 package.status = "CONFIRMED"
@@ -376,12 +395,11 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
             elif package.status == "OPEN":
                 package.status = "CONFIRMING"
 
-    await inv_svc._ensure_invoice(db, payment)
-    await db.flush()
-    await _send_capture_notifications(db, payment)
-
     if trip_just_confirmed:
-        await _release_tranche1_for_group(db, payment.group_id, member_user_ids)
+        await db.flush()
+        await _release_tranche1_for_group(db, group.id, member_user_ids)
+
+    return trip_just_confirmed
 
 
 async def _release_tranche1_for_group(db: AsyncSession, group_id: str, member_user_ids: list[str]) -> None:

@@ -194,6 +194,52 @@ def check_completed_trips(self):
         raise self.retry(exc=exc, countdown=300)
 
 
+@celery_app.task(name="app.workers.tasks.reconcile_stuck_group_confirmations", bind=True, max_retries=3)
+def reconcile_stuck_group_confirmations(self):
+    """Safety net: confirmed live that a group can occasionally reach its
+    required captured-payment count without _finalize_capture's real-time
+    path flipping the plan/package to CONFIRMED and releasing tranche1 —
+    root cause not conclusively pinned down (re-running the identical
+    check against the same data afterward always finds it correctly
+    confirmable, so this reads as a one-off transaction-timing issue
+    rather than a standing logic bug). Scans every CONFIRMING plan/package
+    and re-runs check_and_confirm_group, which is a no-op for anything
+    genuinely still short of travelers."""
+    async def _task():
+        from sqlalchemy import select
+        from app.database import AsyncSessionLocal
+        from app.models.group import Group
+        from app.models.package import Package
+        from app.models.plan import Plan
+        from app.services.payments import check_and_confirm_group
+
+        async with AsyncSessionLocal() as db:
+            plan_groups = await db.execute(
+                select(Group).join(Plan, Plan.id == Group.plan_id).where(Plan.status == "CONFIRMING")
+            )
+            package_groups = await db.execute(
+                select(Group).join(Package, Package.id == Group.package_id).where(Package.status == "CONFIRMING")
+            )
+            groups = [*plan_groups.scalars().all(), *package_groups.scalars().all()]
+
+            confirmed = 0
+            for group in groups:
+                try:
+                    if await check_and_confirm_group(db, group):
+                        confirmed += 1
+                    await db.commit()
+                except Exception:
+                    logger.exception("Group confirmation reconciliation failed for group %s", group.id)
+                    await db.rollback()
+
+            logger.info("Group confirmation reconciliation checked %d group(s), confirmed %d", len(groups), confirmed)
+
+    try:
+        _run_async(_task())
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=300)
+
+
 @celery_app.task(name="app.workers.tasks.notify_direct_message", bind=True, max_retries=2)
 def notify_direct_message(self, recipient_id: str, sender_name: str, content_preview: str):
     """Send a WhatsApp push when a DM arrives — runs off the hot request path."""
