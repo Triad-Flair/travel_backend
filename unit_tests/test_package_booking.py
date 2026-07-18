@@ -10,7 +10,7 @@ from app.services.plans import confirm_plan_with_offer
 
 
 def _fake_package(**overrides):
-    defaults = dict(id="pkg-1", slug="pkg-1-slug", status="OPEN")
+    defaults = dict(id="pkg-1", slug="pkg-1-slug", status="OPEN", group_size_max=14)
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -70,6 +70,39 @@ async def test_book_package_rejects_non_open_package():
 
     with pytest.raises(BadRequestError, match="not currently open"):
         await book_package(db, "pkg-1", "user-1")
+
+
+@pytest.mark.asyncio
+async def test_book_package_allows_joining_a_confirming_package():
+    """Confirmed live: _finalize_capture flips a package OPEN -> CONFIRMING
+    the instant its first traveler pays, long before group_size_min is
+    met — requiring status == OPEN here meant every package became
+    permanently unbookable for every traveler after the first (a real
+    package sitting at 1/14 showed "This package is not currently open
+    for booking" to everyone else)."""
+    pkg = _fake_package(status="CONFIRMING")
+    existing_group = _fake_group(current_size=1)
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[pkg, existing_group, None])
+
+    with patch("app.workers.tasks.send_group_chat_verification_email_task.delay"):
+        await book_package(db, "pkg-1", "user-2")
+
+    assert existing_group.current_size == 2
+
+
+@pytest.mark.asyncio
+async def test_book_package_rejects_when_group_is_already_full():
+    """The status check alone used to be the only thing preventing
+    overbooking; relaxing it to allow CONFIRMING needs its own explicit
+    capacity guard."""
+    pkg = _fake_package(status="CONFIRMING", group_size_max=14)
+    full_group = _fake_group(current_size=14)
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[pkg, full_group, None])
+
+    with pytest.raises(BadRequestError, match="full"):
+        await book_package(db, "pkg-1", "user-15")
 
 
 @pytest.mark.asyncio

@@ -427,7 +427,13 @@ async def book_package(db: AsyncSession, pkg_id: str, user_id: str) -> GroupSumm
     pkg = await db.scalar(select(Package).where(Package.id == pkg_id))
     if not pkg:
         raise NotFoundError("Package")
-    if pkg.status != "OPEN":
+    # CONFIRMING (not just OPEN) must still be bookable — _finalize_capture
+    # flips a package to CONFIRMING the instant its first traveler pays,
+    # long before group_size_min is met. Requiring OPEN here meant every
+    # package became permanently unbookable for every traveler after the
+    # first: confirmed live on a package sitting at 1/14 with "This package
+    # is not currently open for booking" blocking travelers 2 through 14.
+    if pkg.status not in ("OPEN", "CONFIRMING"):
         raise BadRequestError("This package is not currently open for booking")
 
     group = await db.scalar(select(Group).where(Group.package_id == pkg_id))
@@ -444,6 +450,13 @@ async def book_package(db: AsyncSession, pkg_id: str, user_id: str) -> GroupSumm
     )
     if member and member.status in ("APPROVED", "COMMITTED", "INTERESTED"):
         return _group_to_summary_response(group)
+
+    # The status check above was the only thing preventing overbooking —
+    # relaxing it to include CONFIRMING means capacity now needs its own
+    # explicit guard, covering both a brand-new join and an existing
+    # LEFT/REMOVED member rejoining (both paths below increment current_size).
+    if int(group.current_size or 0) >= int(pkg.group_size_max or 0):
+        raise BadRequestError("This group is full")
 
     if member:
         member.status = "APPROVED"
