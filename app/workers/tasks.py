@@ -150,12 +150,13 @@ def check_completed_trips(self):
     Razorpay indefinitely — nothing anywhere ever called complete_trip
     (or execute_agency_payout) automatically; both were reachable only via
     manual admin action nobody was taking. This finds every CONFIRMED
-    plan/package whose trip has actually ended and completes it, which
-    releases any still-unpaid tranche (typically tranche2, the 55% final
-    payout — tranche1 already auto-releases at booking confirmation, see
-    services/payments.py::_release_tranche1_for_group). Self-limiting: once
-    complete_trip flips status to COMPLETED, the same trip no longer
-    matches this query on the next run."""
+    plan/package whose trip has actually ended and completes it. The
+    agency's full payout already goes out at booking confirmation (see
+    services/payments.py::_release_agency_payout_for_group) — this task
+    marks the trip COMPLETED and acts only as a safety net, retrying the
+    payout for any payment that somehow never went out at confirmation
+    time. Self-limiting: once complete_trip flips status to COMPLETED, the
+    same trip no longer matches this query on the next run."""
     async def _task():
         from sqlalchemy import select
         from app.database import AsyncSessionLocal
@@ -198,8 +199,8 @@ def check_completed_trips(self):
 def reconcile_stuck_group_confirmations(self):
     """Safety net: confirmed live that a group can occasionally reach its
     required captured-payment count without _finalize_capture's real-time
-    path flipping the plan/package to CONFIRMED and releasing tranche1 —
-    root cause not conclusively pinned down (re-running the identical
+    path flipping the plan/package to CONFIRMED and releasing the agency's
+    payout — root cause not conclusively pinned down (re-running the identical
     check against the same data afterward always finds it correctly
     confirmable, so this reads as a one-off transaction-timing issue
     rather than a standing logic bug). Scans every CONFIRMING plan/package

@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +25,6 @@ from app.schemas.invoices import (
     InvoiceSummary,
     InvoiceTravelerInfo,
     InvoiceTripInfo,
-    PayoutScheduleItem,
     PlatformInfo,
     SettlementInfo,
     SettlementPaymentInfo,
@@ -261,8 +260,7 @@ async def list_agency_invoices(db: AsyncSession, agency_id: str) -> list[dict]:
                     "status": payment.status,
                     "paidAt": _iso(payment.paid_at),
                     "agencyNetAmount": agency_net,
-                    "tranche1Released": bool(payment.tranche1_released),
-                    "tranche2Released": bool(payment.tranche2_released),
+                    "payoutReleased": bool(payment.payout_released),
                 },
                 "group": {
                     "plan": {
@@ -482,28 +480,12 @@ async def _build_agency_settlement_data(db: AsyncSession, payment: Payment, invo
             traveler_count=max(1, len(member_names)),
         ),
         settlement=SettlementInfo(
-            total_collected=int(payment.amount),
             trip_amount=trip_amount,
             platform_commission=commission,
             platform_fee=platform_fee,
             gst_on_fee=gst_fee,
             agency_net_amount=agency_net,
-            schedule=[
-                PayoutScheduleItem(
-                    tranche=1,
-                    label="Advance Payout (45%)",
-                    amount=int(round(agency_net * 0.45)),
-                    released=bool(payment.tranche1_released),
-                    expected_date=_iso((payment.paid_at or payment.created_at) + timedelta(days=2)),
-                ),
-                PayoutScheduleItem(
-                    tranche=2,
-                    label="Final Payout (55%)",
-                    amount=int(round(agency_net * 0.55)),
-                    released=bool(payment.tranche2_released),
-                    expected_date=end_date,
-                ),
-            ],
+            payout_released=bool(payment.payout_released),
         ),
         payment=SettlementPaymentInfo(
             id=payment.id,

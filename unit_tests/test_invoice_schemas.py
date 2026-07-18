@@ -58,7 +58,7 @@ def test_agency_settlement_response_still_has_the_split_fields():
     assert "settlement" in AgencySettlementResponse.model_fields
     assert "platform_commission" in SettlementInfo.model_fields
     assert "agency_net_amount" in SettlementInfo.model_fields
-    assert "schedule" in SettlementInfo.model_fields
+    assert "payout_released" in SettlementInfo.model_fields
 
 
 def test_user_and_agency_invoice_are_genuinely_separate_schema_classes():

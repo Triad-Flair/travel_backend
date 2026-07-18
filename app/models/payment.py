@@ -22,8 +22,14 @@ class Payment(TimestampsMixin, BaseModel):
     razorpay_payment_id: Mapped[str | None] = mapped_column("razorpayPaymentId", String(100), nullable=True)
     status: Mapped[str] = mapped_column("status", PgEnum("PENDING","AUTHORIZED","CAPTURED","REFUNDED","FAILED",name="PaymentStatus",create_type=False), default="PENDING", nullable=False, index=True)
     escrow_status: Mapped[str] = mapped_column("escrowStatus", PgEnum("HELD","PARTIAL_RELEASE","RELEASED","REFUNDED",name="EscrowStatus",create_type=False), default="HELD", nullable=False)
-    tranche1_released: Mapped[bool] = mapped_column("tranche1Released", Boolean, default=False, nullable=False)
-    tranche2_released: Mapped[bool] = mapped_column("tranche2Released", Boolean, default=False, nullable=False)
+    # Replaces the old tranche1Released/tranche2Released pair — the agency's
+    # net share now goes out in one Razorpay Route transfer at confirmation
+    # rather than split 45/55 across confirmation and trip completion.
+    # payoutAmountPaise tracks the actual amount ever transferred (not just
+    # a boolean) so a partially-paid-out payment from the old scheme can be
+    # topped up to its full amount exactly once, never double-paid.
+    payout_amount_paise: Mapped[int] = mapped_column("payoutAmountPaise", Integer, default=0, nullable=False)
+    payout_released: Mapped[bool] = mapped_column("payoutReleased", Boolean, default=False, nullable=False)
     trip_amount: Mapped[int | None] = mapped_column("tripAmount", Integer, nullable=True)
     platform_fee_amount: Mapped[int | None] = mapped_column("platformFeeAmount", Integer, nullable=True)
     fee_gst_amount: Mapped[int | None] = mapped_column("feeGstAmount", Integer, nullable=True)

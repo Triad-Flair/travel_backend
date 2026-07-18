@@ -97,11 +97,11 @@ class InvoiceSummary(CamelModel):
 
 
 class UserPaymentInfo(CamelModel):
-    """No escrowSchedule here — that reveals the agency's payout split
-    (tranche amounts derived from agencyNetAmount = tripAmount - commission),
-    which combined with tripAmount elsewhere on this same invoice would let a
-    traveler back-calculate the platform's commission. Settlement/schedule
-    info belongs only on AgencySettlementResponse."""
+    """No settlement info here — that reveals the agency's payout split
+    (agencyNetAmount = tripAmount - commission), which combined with
+    tripAmount elsewhere on this same invoice would let a traveler
+    back-calculate the platform's commission. Settlement info belongs only
+    on AgencySettlementResponse."""
     id: str
     razorpay_order_id: str | None = None
     razorpay_payment_id: str | None = None
@@ -129,24 +129,15 @@ class UserInvoiceResponse(CamelModel):
     members: list[str] = []
 
 
-class PayoutScheduleItem(CamelModel):
-    tranche: int
-    label: str
-    amount: int
-    released: bool
-    expected_date: str | None = None
-
-
 class SettlementInfo(CamelModel):
     """Agency-facing only — the gross/commission/net split. Never expose this
     shape (or its field names) on UserInvoiceResponse."""
-    total_collected: int
     trip_amount: int
     platform_commission: int
     platform_fee: int
     gst_on_fee: int
     agency_net_amount: int
-    schedule: list[PayoutScheduleItem]
+    payout_released: bool
 
 
 class SettlementPaymentInfo(CamelModel):

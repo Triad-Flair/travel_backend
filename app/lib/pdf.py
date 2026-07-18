@@ -131,15 +131,7 @@ def render_agency_settlement_pdf(payload: AgencySettlementResponse) -> bytes:
         # owed to the agency) — deliberately not surfaced on this document at
         # all, unconditionally, regardless of its value.
         "agency_net_inr": _inr(settlement["agency_net_amount"]),
-        "schedule": [
-            {
-                "tranche": item["tranche"],
-                "label": item["label"],
-                "amount_inr": _inr(item["amount"]),
-                "released": item["released"],
-            }
-            for item in settlement["schedule"]
-        ],
+        "payout_released": settlement["payout_released"],
     }
     html = _env.get_template("agency_settlement.html").render(**context)
     return HTML(string=html, base_url=str(_TEMPLATES_DIR)).write_pdf()

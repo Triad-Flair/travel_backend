@@ -1,10 +1,9 @@
-"""complete_trip used to fake tranche2 settlement: it flipped
-tranche2_released/escrowStatus/transferStatus directly and emailed the
-agency a "final settlement" notice, without ever calling create_transfer or
-crediting AgencyWallet — the only function that actually does either is
-execute_agency_payout, which complete_trip bypassed entirely. Harmless only
-because no agency has a linked Razorpay account yet; the moment one does,
-agencies would be told they'd been paid when no money had moved.
+"""The agency's full payout now goes out at booking confirmation (see
+test_agency_payout_auto_release.py), not on trip completion. complete_trip
+still routes through execute_agency_payout as a safety net for any payment
+whose confirmation-time payout never went out — it queries only payments
+with payout_released=False, so a normally-paid trip triggers zero payout
+calls here.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,18 +26,16 @@ def _fake_plan(**overrides):
 
 
 def _fake_payment(**overrides):
-    defaults = dict(
-        id="payment-1", status="CAPTURED", tranche1_released=False, tranche2_released=False,
-    )
+    defaults = dict(id="payment-1", status="CAPTURED", payout_released=False)
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
 
-def _db_with(group=None, plan=None, package=None, captured_payments=None):
+def _db_with(group=None, plan=None, package=None, unpaid_payments=None):
     db = AsyncMock()
     db.scalar = AsyncMock(side_effect=[group, plan, package])
     result = MagicMock()
-    result.scalars.return_value.all.return_value = captured_payments or []
+    result.scalars.return_value.all.return_value = unpaid_payments or []
     db.execute = AsyncMock(return_value=result)
     return db
 
@@ -47,7 +44,7 @@ def _db_with(group=None, plan=None, package=None, captured_payments=None):
 async def test_complete_trip_marks_plan_completed():
     group = _fake_group()
     plan = _fake_plan()
-    db = _db_with(group=group, plan=plan, captured_payments=[])
+    db = _db_with(group=group, plan=plan, unpaid_payments=[])
 
     await complete_trip(db, "group-1")
 
@@ -55,43 +52,28 @@ async def test_complete_trip_marks_plan_completed():
 
 
 @pytest.mark.asyncio
-async def test_complete_trip_routes_unreleased_tranches_through_execute_agency_payout():
+async def test_complete_trip_pays_out_any_payment_still_missing_its_payout():
+    """Safety net: a payment whose confirmation-time payout never fired
+    (e.g. a Route transfer failure) still gets paid when its trip completes."""
     group = _fake_group()
     plan = _fake_plan()
     payment = _fake_payment()
-    db = _db_with(group=group, plan=plan, captured_payments=[payment])
+    db = _db_with(group=group, plan=plan, unpaid_payments=[payment])
 
     with patch("app.services.payments.execute_agency_payout", new=AsyncMock()) as mock_payout:
         result = await complete_trip(db, "group-1")
 
-    mock_payout.assert_any_call(db, "payment-1", "tranche1")
-    mock_payout.assert_any_call(db, "payment-1", "tranche2")
-    assert mock_payout.call_count == 2
+    mock_payout.assert_called_once_with(db, "payment-1")
     assert result["payoutFailures"] == []
 
 
 @pytest.mark.asyncio
-async def test_complete_trip_skips_already_released_tranches():
+async def test_complete_trip_does_not_touch_already_paid_out_payments():
+    """The query itself filters to payout_released == False; this documents
+    that complete_trip only acts on what that query returns."""
     group = _fake_group()
     plan = _fake_plan()
-    payment = _fake_payment(tranche1_released=True, tranche2_released=False)
-    db = _db_with(group=group, plan=plan, captured_payments=[payment])
-
-    with patch("app.services.payments.execute_agency_payout", new=AsyncMock()) as mock_payout:
-        await complete_trip(db, "group-1")
-
-    mock_payout.assert_called_once_with(db, "payment-1", "tranche2")
-
-
-@pytest.mark.asyncio
-async def test_complete_trip_ignores_non_captured_payments():
-    """A PENDING or FAILED payment has no money in escrow — it must never
-    trigger a payout just because the trip finished."""
-    group = _fake_group()
-    plan = _fake_plan()
-    # The query itself filters to status == CAPTURED; this test documents
-    # that complete_trip only acts on what that query returns.
-    db = _db_with(group=group, plan=plan, captured_payments=[])
+    db = _db_with(group=group, plan=plan, unpaid_payments=[])
 
     with patch("app.services.payments.execute_agency_payout", new=AsyncMock()) as mock_payout:
         await complete_trip(db, "group-1")
@@ -107,9 +89,9 @@ async def test_complete_trip_continues_and_reports_after_payout_failure():
     plan = _fake_plan()
     payment_a = _fake_payment(id="payment-a")
     payment_b = _fake_payment(id="payment-b")
-    db = _db_with(group=group, plan=plan, captured_payments=[payment_a, payment_b])
+    db = _db_with(group=group, plan=plan, unpaid_payments=[payment_a, payment_b])
 
-    async def _payout_side_effect(_db, payment_id, tranche):
+    async def _payout_side_effect(_db, payment_id):
         if payment_id == "payment-a":
             raise Exception("Razorpay transfer failed")
 
@@ -117,6 +99,4 @@ async def test_complete_trip_continues_and_reports_after_payout_failure():
         result = await complete_trip(db, "group-1")
 
     assert plan.status == "COMPLETED"
-    assert "payment-a:tranche1" in result["payoutFailures"]
-    assert "payment-a:tranche2" in result["payoutFailures"]
-    assert not any("payment-b" in f for f in result["payoutFailures"])
+    assert result["payoutFailures"] == ["payment-a"]

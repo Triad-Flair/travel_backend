@@ -46,27 +46,10 @@
         </tfoot>
       </table>
 
-      <h2 class="section-heading" style="margin-top: 22px;">Payout Schedule</h2>
-      <table class="line-items">
-        <thead>
-          <tr><th>Tranche</th><th>Description</th><th class="number">Amount (INR)</th><th class="center">Status</th></tr>
-        </thead>
-        <tbody>
-          {% for item in schedule %}
-          <tr>
-            <td class="center">{{ item.tranche }}</td>
-            <td>{{ item.label }}</td>
-            <td class="number">&#8377;{{ item.amount_inr }}</td>
-            <td class="center">{{ "Released" if item.released else "Pending" }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-
       <div class="total-card">
         <div class="total-card-cell" style="width: 65%;">
           <p class="total-label">TOTAL NET PAYABLE TO AGENCY (INR)</p>
-          <p class="amount-words">Trip amount less platform commission, released per the tranche schedule above.</p>
+          <p class="amount-words">Trip amount less platform commission, released in full to the agency's Razorpay-linked account once the trip is confirmed. Payout status: {{ "Released" if payout_released else "Pending" }}.</p>
         </div>
         <div class="total-card-cell grand-total">&#8377;{{ agency_net_inr }}</div>
       </div>

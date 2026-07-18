@@ -1,7 +1,7 @@
 """Confirmed live: a package sitting at 2/2 required captured travelers
 (group_size_min=2, both COMMITTED) never flipped to CONFIRMED and never
-released tranche1 — the real-time check inside _finalize_capture silently
-missed it. Re-running the identical computation against the same data
+released the agency's payout — the real-time check inside _finalize_capture
+silently missed it. Re-running the identical computation against the same data
 afterward correctly found it confirmable, so the check itself is sound;
 this reads as a one-off transaction-timing issue. check_and_confirm_group
 extracts that check into a function reusable both in the real-time path
@@ -35,7 +35,7 @@ def _fake_member(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_confirms_package_and_releases_tranche1_when_fully_captured():
+async def test_confirms_package_and_releases_agency_payout_when_fully_captured():
     group = _fake_group()
     package = _fake_package(group_size_min=2)
     members = [_fake_member(user_id="user-1"), _fake_member(user_id="user-2")]
@@ -47,7 +47,7 @@ async def test_confirms_package_and_releases_tranche1_when_fully_captured():
     # captured_count query, then package lookup.
     db.scalar = AsyncMock(side_effect=[2, package])
 
-    with patch("app.services.payments._release_tranche1_for_group", new=AsyncMock()) as mock_release:
+    with patch("app.services.payments._release_agency_payout_for_group", new=AsyncMock()) as mock_release:
         confirmed = await check_and_confirm_group(db, group)
 
     assert confirmed is True
@@ -67,7 +67,7 @@ async def test_is_idempotent_for_already_confirmed_package():
     db.execute = AsyncMock(return_value=execute_result)
     db.scalar = AsyncMock(side_effect=[2, package])
 
-    with patch("app.services.payments._release_tranche1_for_group", new=AsyncMock()) as mock_release:
+    with patch("app.services.payments._release_agency_payout_for_group", new=AsyncMock()) as mock_release:
         confirmed = await check_and_confirm_group(db, group)
 
     assert confirmed is False
@@ -86,7 +86,7 @@ async def test_does_not_confirm_when_below_minimum_travelers():
     db.execute = AsyncMock(return_value=execute_result)
     db.scalar = AsyncMock(side_effect=[2, package])
 
-    with patch("app.services.payments._release_tranche1_for_group", new=AsyncMock()) as mock_release:
+    with patch("app.services.payments._release_agency_payout_for_group", new=AsyncMock()) as mock_release:
         confirmed = await check_and_confirm_group(db, group)
 
     assert confirmed is False
@@ -109,7 +109,7 @@ async def test_does_not_confirm_when_a_member_has_not_yet_paid():
     db.execute = AsyncMock(return_value=execute_result)
     db.scalar = AsyncMock(side_effect=[2, package])  # only 2 of 3 active members captured
 
-    with patch("app.services.payments._release_tranche1_for_group", new=AsyncMock()) as mock_release:
+    with patch("app.services.payments._release_agency_payout_for_group", new=AsyncMock()) as mock_release:
         confirmed = await check_and_confirm_group(db, group)
 
     assert confirmed is False

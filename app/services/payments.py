@@ -43,17 +43,10 @@ logger = logging.getLogger(__name__)
 PLATFORM_FEE_PAISE = 0  # no separate platform fee is charged to travelers — platform revenue is commission-only, deducted from the agency's payout
 FEE_GST_RATE = 0.18  # GST is charged on the package price itself (18%), paid by the traveler on top — it's strictly between traveler and platform and never touches the agency's payout
 COMMISSION_RATE = 0.10
-TRANCHE_1_RATIO = 0.45
-TRANCHE_2_RATIO = 0.55
 WALLET_USAGE_CAP_RATE = 0.50  # max share of the trip amount a traveler can cover from wallet balance in one purchase
 POINTS_USAGE_CAP_RATE = 0.20
 
 ACTIVE_MEMBER_STATUSES = {"APPROVED", "COMMITTED"}
-
-
-def _tranche_amount(agency_net: int, tranche: str) -> int:
-    ratio = TRANCHE_2_RATIO if tranche == "tranche2" else TRANCHE_1_RATIO
-    return int(round(agency_net * ratio))
 
 
 def _iso(value):
@@ -89,8 +82,7 @@ def _payment_to_response(payment: Payment) -> PaymentRecordResponse:
         razorpay_payment_id=payment.razorpay_payment_id,
         status=payment.status,
         escrow_status=payment.escrow_status,
-        tranche1_released=bool(payment.tranche1_released),
-        tranche2_released=bool(payment.tranche2_released),
+        payout_released=bool(payment.payout_released),
         payout_frozen=bool(payment.payout_frozen),
         points_redeemed=int(payment.points_redeemed or 0),
         wallet_amount_used=int(payment.wallet_amount_used or 0),
@@ -135,7 +127,7 @@ async def _send_capture_notifications(db: AsyncSession, payment: Payment) -> Non
             )
 
 
-async def _send_payout_notification(db: AsyncSession, payment: Payment, tranche: str) -> None:
+async def _send_payout_notification(db: AsyncSession, payment: Payment, released_amount: int) -> None:
     invoice = await inv_svc._ensure_invoice(db, payment)
     ctx = await inv_svc._trip_context(db, payment)
     agency = ctx["agency"]
@@ -146,16 +138,12 @@ async def _send_payout_notification(db: AsyncSession, payment: Payment, tranche:
     if not owner or not owner.email:
         return
 
-    agency_net = int((payment.trip_amount or 0) - (payment.commission_amount or 0))
-    tranche_label = "Final settlement" if tranche == "tranche2" else "Advance payout"
-    released_amount = _tranche_amount(agency_net, tranche)
-
     await send_agency_payout_update_email(
         owner.email,
         owner.display_name or owner.username or agency.name,
         agency.name,
         invoice.invoice_number.replace("TSU", "TSA"),
-        tranche_label,
+        "Settlement payout",
         payment.escrow_status,
         f"{settings.frontend_url}/agency/invoices/{payment.id}",
         released_amount,
@@ -342,17 +330,17 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
 
 
 async def check_and_confirm_group(db: AsyncSession, group: Group) -> bool:
-    """Flips the group's plan/package to CONFIRMED and auto-releases
-    tranche1 once every required traveler has a captured payment. Shared
-    by _finalize_capture (the real-time path, called on every capture) and
-    reconcile_stuck_group_confirmations (a periodic safety net) — confirmed
-    live that the real-time path can occasionally miss this on its own
-    (root cause not conclusively identified; re-running this exact
-    computation against the same data afterward correctly detected the
-    group as confirmable, meaning the check itself is sound and this is
-    most likely a one-off transaction-timing issue rather than a logic
-    bug). Idempotent: does nothing if the plan/package is already
-    CONFIRMED. Returns True if it just confirmed the trip."""
+    """Flips the group's plan/package to CONFIRMED and auto-releases the
+    agency's full payout once every required traveler has a captured
+    payment. Shared by _finalize_capture (the real-time path, called on
+    every capture) and reconcile_stuck_group_confirmations (a periodic
+    safety net) — confirmed live that the real-time path can occasionally
+    miss this on its own (root cause not conclusively identified;
+    re-running this exact computation against the same data afterward
+    correctly detected the group as confirmable, meaning the check itself
+    is sound and this is most likely a one-off transaction-timing issue
+    rather than a logic bug). Idempotent: does nothing if the plan/package
+    is already CONFIRMED. Returns True if it just confirmed the trip."""
     members_rows = await db.execute(
         select(GroupMember).where(
             GroupMember.group_id == group.id,
@@ -397,34 +385,36 @@ async def check_and_confirm_group(db: AsyncSession, group: Group) -> bool:
 
     if trip_just_confirmed:
         await db.flush()
-        await _release_tranche1_for_group(db, group.id, member_user_ids)
+        await _release_agency_payout_for_group(db, group.id, member_user_ids)
 
     return trip_just_confirmed
 
 
-async def _release_tranche1_for_group(db: AsyncSession, group_id: str, member_user_ids: list[str]) -> None:
-    """Auto-releases the 45% advance payout the instant every required
-    traveler has paid and the trip flips to CONFIRMED. Before this,
-    nothing anywhere ever called execute_agency_payout automatically — it
-    was reachable only via a manual admin endpoint nobody was hitting,
-    confirmed live by a real captured payment sitting with `Transfer: --`
-    on Razorpay indefinitely. A transfer failure here must never abort the
-    capture flow that's already committed to notifying/invoicing the
-    traveler — logged and left for retry via the same admin endpoint or a
-    later automatic pass, not re-raised."""
+async def _release_agency_payout_for_group(db: AsyncSession, group_id: str, member_user_ids: list[str]) -> None:
+    """Auto-releases the agency's full net share (90% of trip amount) the
+    instant every required traveler has paid and the trip flips to
+    CONFIRMED — one transfer per payment, not split across confirmation
+    and trip completion. Before this, nothing anywhere ever called
+    execute_agency_payout automatically — it was reachable only via a
+    manual admin endpoint nobody was hitting, confirmed live by a real
+    captured payment sitting with `Transfer: --` on Razorpay indefinitely.
+    A transfer failure here must never abort the capture flow that's
+    already committed to notifying/invoicing the traveler — logged and
+    left for retry via the same admin endpoint or a later automatic pass,
+    not re-raised."""
     rows = await db.execute(
         select(Payment).where(
             Payment.group_id == group_id,
             Payment.user_id.in_(member_user_ids),
             Payment.status == "CAPTURED",
-            Payment.tranche1_released == False,  # noqa: E712 — SQLAlchemy needs `== False`, not `is False`
+            Payment.payout_released == False,  # noqa: E712 — SQLAlchemy needs `== False`, not `is False`
         )
     )
     for member_payment in rows.scalars().all():
         try:
-            await execute_agency_payout(db, member_payment.id, "tranche1")
+            await execute_agency_payout(db, member_payment.id)
         except Exception:
-            logger.exception("Auto tranche1 payout failed for payment %s", member_payment.id)
+            logger.exception("Auto agency payout failed for payment %s", member_payment.id)
 
 
 async def list_my_payments(
@@ -1145,12 +1135,12 @@ async def _handle_payment_refunded(db: AsyncSession, payload: dict) -> None:
     payment.status = "REFUNDED"
     payment.escrow_status = "REFUNDED"
     # Freeze payouts outright, same mechanism a chargeback uses — whether or
-    # not a tranche already released, nothing further should go out for
+    # not a payout already released, nothing further should go out for
     # money that's been sent back to the traveler.
     payment.payout_frozen = True
     await db.flush()
     logger.warning(
-        "Payment %s refunded (₹%s) — payouts frozen; any tranche already released needs manual reconciliation",
+        "Payment %s refunded (₹%s) — payouts frozen; any payout already released needs manual reconciliation",
         payment.id, int(refunded_amount) / 100,
     )
 
@@ -1184,10 +1174,10 @@ async def _handle_payment_dispute(db: AsyncSession, event: str, payload: dict) -
         )
         db.add(dispute)
 
-    # Freeze payouts the instant a chargeback opens — releasing tranche2 to
+    # Freeze payouts the instant a chargeback opens — releasing the payout to
     # the agency while Razorpay might claw the funds back leaves the
     # platform holding the loss with no recourse from the agency. LOST stays
-    # frozen: the funds are gone, and if a tranche was already paid out an
+    # frozen: the funds are gone, and if the payout was already sent an
     # admin has to reconcile it manually — there's no automatic clawback
     # from the agency wallet here, deliberately, since debiting it
     # automatically could take a balance negative.
@@ -1337,7 +1327,13 @@ async def get_agency_payout_summary(db: AsyncSession, agency_id: str) -> dict:
     }
 
 
-async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str) -> dict:
+async def execute_agency_payout(db: AsyncSession, payment_id: str) -> dict:
+    """Sends the agency its full net share (trip amount minus platform
+    commission) in a single Razorpay Route transfer. Tracks the amount
+    actually paid out (payout_amount_paise) rather than a plain released
+    flag so that a payment partially paid out under the old two-tranche
+    scheme gets topped up to its full amount exactly once here, instead of
+    being re-paid or left short."""
     payment = await db.scalar(select(Payment).where(Payment.id == payment_id))
     if not payment:
         raise NotFoundError("Payment")
@@ -1352,21 +1348,20 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
         # FAILED, AUTHORIZED) has no real money behind it either.
         raise BadRequestError(f"Cannot pay out a payment that isn't captured (status: {payment.status})")
 
-    already_released = bool(payment.tranche2_released) if tranche == "tranche2" else bool(payment.tranche1_released)
-    if already_released:
-        # Idempotent: never re-attempt a Razorpay transfer for a tranche
-        # that's already marked released.
+    agency_net = int((payment.trip_amount or 0) - (payment.commission_amount or 0))
+    already_paid = int(payment.payout_amount_paise or 0)
+    amount = agency_net - already_paid
+    if amount <= 0:
+        # Idempotent: nothing left owed — never re-attempt a Razorpay
+        # transfer once the agency has been paid in full.
         return {
             "paymentId": payment.id,
-            "tranche": tranche,
             "escrowStatus": payment.escrow_status,
             "releasedAt": datetime.now(UTC).isoformat(),
         }
 
     ctx = await inv_svc._trip_context(db, payment)
     agency = ctx["agency"]
-    agency_net = int((payment.trip_amount or 0) - (payment.commission_amount or 0))
-    amount = _tranche_amount(agency_net, tranche)
 
     bank = (
         await db.scalar(select(AgencyBankAccount).where(AgencyBankAccount.agency_id == agency.id))
@@ -1382,11 +1377,10 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
         and amount > 0
     )
 
-    # Seam: without a Razorpay linked account on file (true for every agency
-    # today — see agency_bank_accounts.razorpayAccountId), this falls back to
-    # the pre-existing manual/bookkeeping-only payout. Once an agency is
-    # onboarded through Razorpay's Linked Account/KYC flow (not built here),
-    # this same call starts moving real money via Razorpay Route.
+    # Seam: without a Razorpay linked account on file, this falls back to a
+    # manual/bookkeeping-only payout. Once an agency is onboarded through
+    # Razorpay's Linked Account/KYC flow, this same call moves real money
+    # via Razorpay Route.
     transfer_id = None
     if can_route_transfer:
         try:
@@ -1394,28 +1388,21 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
                 payment.razorpay_payment_id,
                 bank.razorpay_account_id,
                 amount,
-                notes={"paymentId": payment.id, "tranche": tranche},
+                notes={"paymentId": payment.id},
             )
             transfer_id = transfer.get("id")
         except PaymentError as exc:
-            logger.error("Razorpay Route transfer failed for payment %s (%s): %s", payment.id, tranche, exc)
+            logger.error("Razorpay Route transfer failed for payment %s: %s", payment.id, exc)
             payment.transfer_status = "FAILED"
             await db.flush()
             raise BadRequestError(
                 "Razorpay transfer failed — the agency has not been paid. Check the linked account and retry."
             ) from exc
 
-    if tranche == "tranche2":
-        payment.tranche2_released = True
-    else:
-        payment.tranche1_released = True
-
-    if payment.tranche1_released and payment.tranche2_released:
-        payment.escrow_status = "RELEASED"
-        payment.transfer_status = "SETTLED"
-    else:
-        payment.escrow_status = "PARTIAL_RELEASE"
-        payment.transfer_status = "SETTLED" if transfer_id else "PROCESSING"
+    payment.payout_amount_paise = already_paid + amount
+    payment.payout_released = True
+    payment.escrow_status = "RELEASED"
+    payment.transfer_status = "SETTLED" if transfer_id else "MANUAL"
 
     if agency:
         wallet = await db.scalar(select(AgencyWallet).where(AgencyWallet.agency_id == agency.id))
@@ -1428,19 +1415,19 @@ async def execute_agency_payout(db: AsyncSession, payment_id: str, tranche: str)
                 wallet_id=wallet.id if wallet else "",
                 type="PAYOUT_ROUTE" if transfer_id else "PAYOUT_MANUAL",
                 amount=amount,
-                description=f"{tranche} payout for payment {payment.id}",
+                description=f"Settlement payout for payment {payment.id}",
                 payment_id=payment.id,
                 razorpay_transfer_id=transfer_id,
             )
         )
 
     await db.flush()
-    await _send_payout_notification(db, payment, tranche)
+    await _send_payout_notification(db, payment, amount)
     return {
         "paymentId": payment.id,
-        "tranche": tranche,
         "escrowStatus": payment.escrow_status,
         "transferId": transfer_id,
+        "amount": amount,
         "releasedAt": datetime.now(UTC).isoformat(),
     }
 
@@ -1491,34 +1478,33 @@ async def complete_trip(db: AsyncSession, group_id: str) -> dict:
         if package:
             package.status = "COMPLETED"
 
-    # Route every outstanding tranche through the same payout path the manual
-    # admin endpoint uses (execute_agency_payout) instead of flipping
-    # escrow/transfer flags directly. The old code marked tranche2 SETTLED
-    # and emailed the agency a "final settlement" notice without ever calling
-    # create_transfer or crediting AgencyWallet — harmless only because no
-    # agency has a linked Razorpay account yet, but it would tell agencies
-    # they'd been paid when no money had moved. Only CAPTURED payments are
-    # eligible; a PENDING/FAILED payment has no money to release.
+    # Agencies are now paid their full share at confirmation time (see
+    # _release_agency_payout_for_group), not on trip completion — but this
+    # stays as a safety net via the same idempotent execute_agency_payout
+    # path, in case a payment's confirmation-time payout ever failed or was
+    # skipped. Only CAPTURED payments are eligible; a PENDING/FAILED
+    # payment has no money to release.
     rows = await db.execute(
-        select(Payment).where(Payment.group_id == group_id, Payment.status == "CAPTURED")
+        select(Payment).where(
+            Payment.group_id == group_id,
+            Payment.status == "CAPTURED",
+            Payment.payout_released == False,  # noqa: E712 — SQLAlchemy needs `== False`, not `is False`
+        )
     )
     payments = rows.scalars().all()
     payout_failures: list[str] = []
     for payment in payments:
-        for tranche, released in (("tranche1", payment.tranche1_released), ("tranche2", payment.tranche2_released)):
-            if released:
-                continue
-            try:
-                await execute_agency_payout(db, payment.id, tranche)
-            except Exception:
-                # A payout failure (e.g. a real Route transfer rejected)
-                # must not block marking the trip itself as completed —
-                # that's a logistics fact independent of settlement status.
-                # execute_agency_payout already persists transfer_status
-                # FAILED before raising, so it's visible for admin retry via
-                # the existing idempotent /payments/agency/payout endpoint.
-                logger.exception("Trip completion payout failed for payment %s (%s)", payment.id, tranche)
-                payout_failures.append(f"{payment.id}:{tranche}")
+        try:
+            await execute_agency_payout(db, payment.id)
+        except Exception:
+            # A payout failure (e.g. a real Route transfer rejected) must
+            # not block marking the trip itself as completed — that's a
+            # logistics fact independent of settlement status.
+            # execute_agency_payout already persists transfer_status
+            # FAILED before raising, so it's visible for admin retry via
+            # the existing idempotent /payments/agency/payout endpoint.
+            logger.exception("Trip completion payout failed for payment %s", payment.id)
+            payout_failures.append(payment.id)
 
     await db.flush()
     return {"groupId": group_id, "status": "COMPLETED", "payoutFailures": payout_failures}

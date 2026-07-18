@@ -192,7 +192,7 @@ async def test_execute_agency_payout_refuses_when_payment_not_captured():
     db.scalar = AsyncMock(return_value=payment)
 
     with pytest.raises(BadRequestError, match="chargeback"):
-        await execute_agency_payout(db, "payment-1", "tranche1")
+        await execute_agency_payout(db, "payment-1")
 
 
 @pytest.mark.asyncio
@@ -204,7 +204,7 @@ async def test_execute_agency_payout_refuses_pending_payment_even_when_not_froze
     db.scalar = AsyncMock(return_value=payment)
 
     with pytest.raises(BadRequestError, match="isn't captured"):
-        await execute_agency_payout(db, "payment-1", "tranche1")
+        await execute_agency_payout(db, "payment-1")
 
 
 # ── payment.dispute.* (real chargebacks, distinct from customer Dispute) ───
@@ -300,7 +300,7 @@ async def test_execute_agency_payout_refuses_when_payout_frozen():
     db.scalar = AsyncMock(return_value=payment)
 
     with pytest.raises(BadRequestError, match="chargeback"):
-        await execute_agency_payout(db, "payment-1", "tranche1")
+        await execute_agency_payout(db, "payment-1")
 
 
 # ── downtime / notification / invoice / payment_link: no-op, never crash ───

@@ -295,13 +295,11 @@ async def agency_payouts(
 @router.post("/agency/payout/{payment_id}")
 async def agency_payout(
     payment_id: str,
-    payload: dict,
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     current_user.require_admin()
-    tranche = "tranche2" if str(payload.get("tranche")) == "tranche2" else "tranche1"
-    return await pay_svc.execute_agency_payout(db, payment_id, tranche)
+    return await pay_svc.execute_agency_payout(db, payment_id)
 
 
 # Razorpay's real payloads are a few KB; anything past this is either a

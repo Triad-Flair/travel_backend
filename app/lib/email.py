@@ -306,14 +306,14 @@ async def send_agency_payout_update_email(
     owner_name: str,
     agency_name: str,
     invoice_number: str,
-    tranche_label: str,
+    payout_label: str,
     escrow_status: str,
     settlement_url: str,
     released_amount_paise: int,
 ) -> bool:
     body = f"""
     <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{COLOR_INK};">Payout update for {agency_name}</h1>
-    <p style="margin:0;">Hi {owner_name}, {tranche_label} has been released.</p>
+    <p style="margin:0;">Hi {owner_name}, {payout_label} has been released.</p>
     {_feature_list([
         ("Settlement ref", invoice_number),
         ("Released amount", _format_inr(released_amount_paise)),
@@ -321,7 +321,7 @@ async def send_agency_payout_update_email(
     ])}
     {_button("Open settlement", settlement_url)}
     """
-    return await send_email(to, f"{tranche_label} released", _shell(f"{tranche_label} has been released.", body))
+    return await send_email(to, f"{payout_label} released", _shell(f"{payout_label} has been released.", body))
 
 
 async def send_offer_notification_email(to: str, plan_title: str, agency_name: str) -> bool:
