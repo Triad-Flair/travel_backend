@@ -36,6 +36,7 @@ from app.schemas.invoices import (
 
 PLATFORM_INFO = {
     "name": "Triad Flair IT Solutions LLP",
+    "brandName": "Travellers India",
     "tagline": "India's Social Travel Platform",
     "address": "H65, Sector 63, Noida, Uttar Pradesh 201301",
     "gstin": "09ABAFT1926H1Z6",
@@ -43,7 +44,7 @@ PLATFORM_INFO = {
     "website": "https://travellersin.com",
     "llpin": "ACY-7379",
     "supportEmail": "connect@triadflair.com",
-    "supportPhone": None,
+    "supportPhone": "+91 92056 29899",
 }
 
 REFUND_POLICY = [

@@ -3,6 +3,10 @@ from app.schemas.base import CamelModel
 
 class PlatformInfo(CamelModel):
     name: str
+    # Customer-facing brand shown prominently in the invoice header/logo —
+    # deliberately separate from `name`, which stays the exact registered
+    # legal entity name required on every GST line/signature/declaration.
+    brand_name: str
     tagline: str | None = None
     address: str
     gstin: str
