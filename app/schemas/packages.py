@@ -5,6 +5,10 @@ from app.schemas.common import AgencyCard, AgencyPublicSummary
 from app.schemas.plans import GroupSummary, ItineraryItem
 
 
+class PackageCardGroupSummary(CamelModel):
+    current_size: int
+
+
 class PackageCardResponse(CamelModel):
     """Lightweight package card for list/discover endpoints.
     No itinerary, cancellation rules, inclusions, or full gallery — just what
@@ -27,6 +31,10 @@ class PackageCardResponse(CamelModel):
     avg_rating: float = 0.0
     review_count: int = 0
     created_at: str
+    # Frontend (agency overview/packages/analytics) reads pkg.group.currentSize
+    # for the "X/groupSizeMax" fill badge — omitted from this response for
+    # every agency-facing package list until now, so it always rendered "0".
+    group: PackageCardGroupSummary | None = None
 
 
 # Matches frontend PackageDetails exactly

@@ -15,7 +15,14 @@ from app.models.group import Group, GroupMember
 from app.models.package import Package
 from app.schemas.common import AgencyCard, AgencyPublicSummary, UserSummary
 from app.schemas.groups import GroupSummaryResponse
-from app.schemas.packages import CreatePackageRequest, PackageCardResponse, PackageDetails, PackageMeta, UpdatePackageRequest
+from app.schemas.packages import (
+    CreatePackageRequest,
+    PackageCardGroupSummary,
+    PackageCardResponse,
+    PackageDetails,
+    PackageMeta,
+    UpdatePackageRequest,
+)
 from app.schemas.plans import GroupMemberSummary, GroupSummary
 
 ACTIVE_MEMBER_STATUSES = ("APPROVED", "COMMITTED")
@@ -37,7 +44,7 @@ def _agency_to_card(agency: Agency) -> AgencyCard:
     )
 
 
-def _pkg_to_card(pkg: Package) -> PackageCardResponse:
+def _pkg_to_card(pkg: Package, joined_count: int = 0) -> PackageCardResponse:
     gallery = _parse_json_list(pkg.gallery_urls) or []
     return PackageCardResponse(
         id=pkg.id,
@@ -58,7 +65,25 @@ def _pkg_to_card(pkg: Package) -> PackageCardResponse:
         avg_rating=pkg.avg_rating,
         review_count=pkg.review_count,
         created_at=pkg.created_at.isoformat(),
+        group=PackageCardGroupSummary(current_size=joined_count),
     )
+
+
+async def _batch_pkg_joined_counts(db: AsyncSession, pkg_ids: list[str]) -> dict[str, int]:
+    """One query: count active (APPROVED/COMMITTED) members per package
+    group — mirrors discover.py's helper of the same name/shape."""
+    if not pkg_ids:
+        return {}
+    rows = await db.execute(
+        select(Group.package_id, func.count(GroupMember.id).label("cnt"))
+        .join(GroupMember, GroupMember.group_id == Group.id)
+        .where(
+            Group.package_id.in_(pkg_ids),
+            GroupMember.status.in_(ACTIVE_MEMBER_STATUSES),
+        )
+        .group_by(Group.package_id)
+    )
+    return {row.package_id: row.cnt for row in rows if row.package_id}
 
 
 def _agency_to_summary(agency: Agency) -> AgencyPublicSummary:
@@ -276,7 +301,9 @@ async def list_my_packages(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    return [_pkg_to_card(p) for p in result.scalars().all()], total
+    pkgs = result.scalars().all()
+    counts = await _batch_pkg_joined_counts(db, [p.id for p in pkgs])
+    return [_pkg_to_card(p, counts.get(p.id, 0)) for p in pkgs], total
 
 
 async def create_package(db: AsyncSession, agency_id: str, req: CreatePackageRequest) -> PackageDetails:

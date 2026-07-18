@@ -14,7 +14,7 @@ from app.lib.email import (
 from app.lib.razorpay_client import capture_payment, create_order, create_transfer, verify_signature
 from app.models.agency import Agency, AgencyBankAccount, AgencyTransaction, AgencyWallet
 from app.models.group import Group, GroupMember
-from app.models.loyalty import LoyaltyPointsLedger, ReferralWallet
+from app.models.loyalty import LoyaltyPointsLedger, ReferralWallet, ReferralWalletTransaction
 from app.models.offer import Offer
 from app.models.package import Package
 from app.models.payment import Dispute, Payment, PromoCodeUsage, PromotionalDiscount
@@ -287,6 +287,36 @@ async def _finalize_capture(db: AsyncSession, payment: Payment) -> None:
                     used_at=datetime.utcnow(),
                 )
             )
+
+    wallet_used = int(payment.wallet_amount_used or 0)
+    if wallet_used > 0:
+        # Debit the wallet balance the checkout math already promised the
+        # traveler — the invoice/breakdown claims this discount regardless,
+        # so without this the balance never moves and the same credit is
+        # reusable on every future checkout. idempotency_key keyed per
+        # payment (unique constraint) so a retried capture never double-debits.
+        wallet = await db.scalar(select(ReferralWallet).where(ReferralWallet.user_id == payment.user_id))
+        if wallet:
+            existing = await db.scalar(
+                select(ReferralWalletTransaction).where(
+                    ReferralWalletTransaction.idempotency_key == f"checkout:{payment.id}"
+                )
+            )
+            if not existing:
+                wallet.balance = int(wallet.balance or 0) - wallet_used
+                wallet.total_spent = int(wallet.total_spent or 0) + wallet_used
+                db.add(
+                    ReferralWalletTransaction(
+                        id=str(uuid.uuid4()),
+                        wallet_id=wallet.id,
+                        type="checkout_spent",
+                        amount=-wallet_used,
+                        description=f"Wallet credit used at checkout for payment {payment.id}",
+                        reference_id=payment.id,
+                        idempotency_key=f"checkout:{payment.id}",
+                        payment_id=payment.id,
+                    )
+                )
 
     member = await db.scalar(
         select(GroupMember).where(
