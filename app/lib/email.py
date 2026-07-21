@@ -14,7 +14,7 @@ _jinja_env: Environment | None = None
 
 # Always an absolute, publicly reachable URL — email clients cannot load
 # assets from localhost or from whatever FRONTEND_URL is set to in dev.
-LOGO_URL = "https://travellersin.com/_next/image?url=%2Fbrand%2Ftravellersin.png&w=640&q=75"
+LOGO_URL = "https://trawellbuddy.com/_next/image?url=%2Fbrand%2FTrawell-Photoroom.png&w=640&q=75"
 
 # Brand tokens, kept in sync with frontend/app/globals.css
 COLOR_INK = "#1a1a2e"

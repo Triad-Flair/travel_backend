@@ -35,12 +35,12 @@ from app.schemas.invoices import (
 
 PLATFORM_INFO = {
     "name": "Triad Flair IT Solutions LLP",
-    "brandName": "Travellers India",
+    "brandName": "Trawell Buddy",
     "tagline": "India's Social Travel Platform",
     "address": "H65, Sector 63, Noida, Uttar Pradesh 201301",
     "gstin": "09ABAFT1926H1Z6",
     "email": "connect@triadflair.com",
-    "website": "https://travellersin.com",
+    "website": "https://trawellbuddy.com",
     "llpin": "ACY-7379",
     "supportEmail": "connect@triadflair.com",
     "supportPhone": "+91 92056 29899",

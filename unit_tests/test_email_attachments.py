@@ -24,7 +24,7 @@ async def test_smtp_send_without_attachments_is_multipart_alternative():
         mock_settings.smtp_port = 465
         mock_settings.smtp_password = "secret"
         mock_settings.smtp_secure = True
-        mock_settings.zeptomail_from_name = "TravellersIn"
+        mock_settings.zeptomail_from_name = "Trawell Buddy"
         ok = await send_email("traveler@example.com", "Subject", "<p>Body</p>")
 
     assert ok is True
@@ -47,7 +47,7 @@ async def test_smtp_send_with_attachment_is_multipart_mixed_and_carries_the_file
         mock_settings.smtp_port = 465
         mock_settings.smtp_password = "secret"
         mock_settings.smtp_secure = True
-        mock_settings.zeptomail_from_name = "TravellersIn"
+        mock_settings.zeptomail_from_name = "Trawell Buddy"
         ok = await send_email("traveler@example.com", "Subject", "<p>Body</p>", [attachment])
 
     assert ok is True
@@ -88,7 +88,7 @@ async def test_zeptomail_send_encodes_attachment_as_base64():
         mock_settings.zeptomail_api_key = "zk_test_key"
         mock_settings.zeptomail_api_url = "https://api.zeptomail.example/send"
         mock_settings.zeptomail_from_address = "noreply@example.com"
-        mock_settings.zeptomail_from_name = "TravellersIn"
+        mock_settings.zeptomail_from_name = "Trawell Buddy"
         ok = await send_email("agency@example.com", "Subject", "<p>Body</p>", [attachment])
 
     assert ok is True
@@ -123,7 +123,7 @@ async def test_send_email_without_attachments_omits_attachments_key_for_zeptomai
         mock_settings.zeptomail_api_key = "zk_test_key"
         mock_settings.zeptomail_api_url = "https://api.zeptomail.example/send"
         mock_settings.zeptomail_from_address = "noreply@example.com"
-        mock_settings.zeptomail_from_name = "TravellersIn"
+        mock_settings.zeptomail_from_name = "Trawell Buddy"
         await send_email("agency@example.com", "Subject", "<p>Body</p>")
 
     assert "attachments" not in captured["json"]

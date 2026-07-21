@@ -135,7 +135,7 @@ def test_router_parses_form_post_and_redirects_with_303():
     app = _build_test_app()
     client = TestClient(app, follow_redirects=False)
 
-    with patch("app.api.v1.payments.pay_svc.handle_hosted_checkout_callback", new=AsyncMock(return_value="https://travellersin.com/x?payment=success")) as mock_handle:
+    with patch("app.api.v1.payments.pay_svc.handle_hosted_checkout_callback", new=AsyncMock(return_value="https://trawellbuddy.com/x?payment=success")) as mock_handle:
         response = client.post(
             "/api/v1/payments/razorpay-callback",
             data={
@@ -146,7 +146,7 @@ def test_router_parses_form_post_and_redirects_with_303():
         )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "https://travellersin.com/x?payment=success"
+    assert response.headers["location"] == "https://trawellbuddy.com/x?payment=success"
     mock_handle.assert_called_once()
     call_args = mock_handle.call_args.args
     assert call_args[1:] == ("order_abc", "pay_real", "sig_good")
@@ -156,7 +156,7 @@ def test_router_handles_missing_form_fields_without_500():
     app = _build_test_app()
     client = TestClient(app, follow_redirects=False)
 
-    with patch("app.api.v1.payments.pay_svc.handle_hosted_checkout_callback", new=AsyncMock(return_value="https://travellersin.com/dashboard/trips?payment=failed")):
+    with patch("app.api.v1.payments.pay_svc.handle_hosted_checkout_callback", new=AsyncMock(return_value="https://trawellbuddy.com/dashboard/trips?payment=failed")):
         response = client.post("/api/v1/payments/razorpay-callback", data={})
 
     assert response.status_code == 303

@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_name: str = "Travellers India"
+    app_name: str = "Trawell Buddy"
     environment: Literal["development", "staging", "production", "test"] = "development"
     debug: bool = False
     port: int = 4010
@@ -57,8 +57,8 @@ class Settings(BaseSettings):
     # Email
     zeptomail_api_url: str = ""
     zeptomail_api_key: str = ""
-    zeptomail_from_address: str = "noreply@travellersindia.com"
-    zeptomail_from_name: str = "Travellers India"
+    zeptomail_from_address: str = "noreply@trawellbuddy.com"
+    zeptomail_from_name: str = "Trawell Buddy"
     smtp_host: str = Field(default="smtp.zoho.com", validation_alias=AliasChoices("SMTP_HOST", "ZOHO_SMTP_HOST"))
     smtp_port: int = Field(default=465, validation_alias=AliasChoices("SMTP_PORT", "ZOHO_SMTP_PORT"))
     smtp_secure: bool = Field(default=True, validation_alias=AliasChoices("SMTP_SECURE", "ZOHO_SMTP_SECURE"))

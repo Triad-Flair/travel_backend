@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "invoices"
 _LOGO_PATH = Path(__file__).parent.parent / "assets" / "triad-flair-logo.png"
-_BRAND_LOGO_PATH = Path(__file__).parent.parent / "assets" / "travellersin-logo.png"
+_BRAND_LOGO_PATH = Path(__file__).parent.parent / "assets" / "trawellbuddy-logo.png"
 
 _env = Environment(
     loader=FileSystemLoader(str(_TEMPLATES_DIR)),

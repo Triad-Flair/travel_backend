@@ -12,9 +12,9 @@ APP_USER="${APP_USER:-www-data}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 REPO_URL="${REPO_URL:-}"
-DOMAIN="${DOMAIN:-api.travellersin.com}"
-FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-https://travellersin.com}"
-LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-connect@travellersin.com}"
+DOMAIN="${DOMAIN:-api.trawellbuddy.com}"
+FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-https://trawellbuddy.com}"
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-connect@trawellbuddy.com}"
 PORT="${PORT:-4010}"
 DB_NAME="${DB_NAME:-tripsync}"
 DB_USER="${DB_USER:-tripsync}"
@@ -71,7 +71,7 @@ if [[ ! -f ".env" ]]; then
     cp .env.production.example .env
     sed -i \
         -e "s|^FRONTEND_URL=.*|FRONTEND_URL=$FRONTEND_ORIGIN|" \
-        -e "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=$FRONTEND_ORIGIN,https://www.travellersin.com,https://$DOMAIN|" \
+        -e "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=$FRONTEND_ORIGIN,https://www.trawellbuddy.com,https://$DOMAIN|" \
         -e "s|change-me-strong-password|$DB_PASSWORD|g" \
         .env
     echo "Created $BACKEND_DIR/.env from .env.production.example"
