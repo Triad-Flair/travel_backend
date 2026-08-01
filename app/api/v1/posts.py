@@ -19,6 +19,17 @@ async def create_post(
     return await post_svc.create_post(db, current_user.user_id, req)
 
 
+@router.get("/feed", response_model=list[PostResponse])
+async def list_posts_feed(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=12, ge=1, le=50),
+    current_user: CurrentUser | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    viewer_id = current_user.user_id if current_user else None
+    return await post_svc.list_posts_feed(db, viewer_id, page, page_size)
+
+
 @router.get("/by-user/{user_id}", response_model=list[PostResponse])
 async def list_posts_by_user(
     user_id: str,

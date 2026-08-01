@@ -116,6 +116,7 @@ class NotificationType(str, enum.Enum):
     LOYALTY_EARNED = "LOYALTY_EARNED"
     POST_LIKED = "POST_LIKED"
     POST_COMMENTED = "POST_COMMENTED"
+    POST_MENTION = "POST_MENTION"
     SYSTEM = "SYSTEM"
 
 

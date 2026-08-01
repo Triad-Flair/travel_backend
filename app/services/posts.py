@@ -1,7 +1,8 @@
+import re
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import ForbiddenError, NotFoundError
@@ -10,6 +11,8 @@ from app.models.user import User
 from app.schemas.common import UserSummary
 from app.schemas.posts import MAX_POST_IMAGES, CreatePostRequest, PostCommentResponse, PostResponse
 from app.services import notifications as notif_svc
+
+MENTION_PATTERN = re.compile(r"@([a-zA-Z0-9_]{3,50})")
 
 
 def _user_summary(user: User | None) -> UserSummary | None:
@@ -58,6 +61,34 @@ async def _post_to_response(db: AsyncSession, post: Post, viewer_user_id: str | 
     )
 
 
+async def _notify_mentions(db: AsyncSession, post: Post, author: User | None) -> None:
+    """@username tokens in a post caption notify the mentioned users — usernames
+    are always lowercase (signup enforces `^[a-z0-9_]+$`), so tokens are
+    lowercased before lookup regardless of how they were typed/cased."""
+    if not post.caption:
+        return
+    usernames = {m.group(1).lower() for m in MENTION_PATTERN.finditer(post.caption)}
+    if not usernames:
+        return
+
+    rows = await db.execute(select(User).where(func.lower(User.username).in_(usernames)))
+    mentioned_users = rows.scalars().all()
+    author_name = (author.display_name or author.username or "Someone") if author else "Someone"
+
+    for user in mentioned_users:
+        if user.id == post.author_user_id:
+            continue
+        await notif_svc.create_notification(
+            db,
+            user.id,
+            "POST_MENTION",
+            title="You were mentioned in a post",
+            body=f"{author_name} mentioned you in a post.",
+            href=f"/profile/{author.username}" if author and author.username else None,
+            metadata={"postId": post.id, "actorId": post.author_user_id},
+        )
+
+
 async def create_post(db: AsyncSession, user_id: str, req: CreatePostRequest) -> PostResponse:
     post = Post(
         id=str(uuid.uuid4()),
@@ -68,7 +99,29 @@ async def create_post(db: AsyncSession, user_id: str, req: CreatePostRequest) ->
     )
     db.add(post)
     await db.flush()
+
+    author = await db.get(User, user_id)
+    await _notify_mentions(db, post, author)
+
     return await _post_to_response(db, post, user_id)
+
+
+async def list_posts_feed(
+    db: AsyncSession,
+    viewer_user_id: str | None,
+    page: int,
+    page_size: int,
+) -> list[PostResponse]:
+    """Global feed across every user's posts, newest first — the "browse
+    everyone's posts" counterpart to list_posts_by_user's single-profile view."""
+    rows = await db.execute(
+        select(Post)
+        .order_by(Post.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    posts = rows.scalars().all()
+    return [await _post_to_response(db, post, viewer_user_id) for post in posts]
 
 
 async def list_posts_by_user(
