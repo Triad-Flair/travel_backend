@@ -466,3 +466,29 @@ async def list_offers_by_counterpart(
     )
     offers = rows.scalars().all()
     return [await _offer_to_response(db, offer) for offer in offers]
+
+
+async def list_offers_by_agency_owner_for_traveler(
+    db: AsyncSession,
+    user_id: str,
+    agency_owner_user_id: str,
+) -> list[OfferResponse]:
+    """Traveler-side counterpart to list_offers_by_counterpart. DM conversation
+    participants are plain users, so the traveler's "counterpart" in a DM with
+    an agency is that agency's owner user account — resolve it to an Agency,
+    then return the offers that agency has made across all of this traveler's
+    plans, so the DM inbox can show the same offer cards agencies already see."""
+    agency = await db.scalar(select(Agency).where(Agency.owner_id == agency_owner_user_id))
+    if not agency:
+        return []
+    rows = await db.execute(
+        select(Offer)
+        .join(Plan, Plan.id == Offer.plan_id)
+        .where(
+            Offer.agency_id == agency.id,
+            Plan.creator_id == user_id,
+        )
+        .order_by(Offer.updated_at.desc())
+    )
+    offers = rows.scalars().all()
+    return [await _offer_to_response(db, offer) for offer in offers]

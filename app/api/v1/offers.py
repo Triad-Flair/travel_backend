@@ -42,8 +42,13 @@ async def list_by_counterpart(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    agency_id = current_user.require_agency()
-    return await offer_svc.list_offers_by_counterpart(db, agency_id, counterpart_id)
+    """counterpart_id is the *other* DM participant's user id. Agency
+    callers get their offers to that traveler; traveler callers get the
+    offers from that agency (identified by its owner's user id) across
+    all of their own plans."""
+    if current_user.agency_id:
+        return await offer_svc.list_offers_by_counterpart(db, current_user.agency_id, counterpart_id)
+    return await offer_svc.list_offers_by_agency_owner_for_traveler(db, current_user.user_id, counterpart_id)
 
 
 @router.get("/{offer_id}", response_model=OfferResponse)

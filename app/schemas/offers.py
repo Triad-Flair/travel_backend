@@ -9,9 +9,12 @@ class PricingTier(CamelModel):
     price: int
 
 
+MAX_OFFER_PRICE = 5_000_000  # ₹50,00,000/person — generous ceiling that still blocks fat-finger entries
+
+
 class SubmitOfferRequest(CamelModel):
     plan_id: str | None = None
-    price_per_person: int = Field(..., ge=100)
+    price_per_person: int = Field(..., ge=100, le=MAX_OFFER_PRICE)
     pricing_tiers: list[PricingTier] | None = None
     inclusions: dict | None = None
     itinerary: list[dict] | None = None
@@ -22,7 +25,7 @@ class SubmitOfferRequest(CamelModel):
 
 
 class CounterOfferRequest(CamelModel):
-    price: int = Field(..., ge=100)
+    price: int = Field(..., ge=100, le=MAX_OFFER_PRICE)
     message: str | None = None
     inclusions_delta: dict | None = None
 
