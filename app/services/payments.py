@@ -42,7 +42,7 @@ from app.services import notifications as notif_svc
 logger = logging.getLogger(__name__)
 
 PLATFORM_FEE_PAISE = 0  # no separate platform fee is charged to travelers — platform revenue is commission-only, deducted from the agency's payout
-FEE_GST_RATE = 0.18  # GST is charged on the package price itself (18%), paid by the traveler on top — it's strictly between traveler and platform and never touches the agency's payout
+FEE_GST_RATE = 0.05  # GST is charged on the package price itself (5%), paid by the traveler on top — it's strictly between traveler and platform and never touches the agency's payout
 COMMISSION_RATE = 0.10
 WALLET_USAGE_CAP_RATE = 0.50  # max share of the trip amount a traveler can cover from wallet balance in one purchase
 POINTS_USAGE_CAP_RATE = 0.20

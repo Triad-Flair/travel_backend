@@ -28,7 +28,7 @@ def test_compute_breakdown_platform_fee_is_fixed():
     assert breakdown["platformFeeAmount"] == PLATFORM_FEE_PAISE
 
 
-def test_compute_breakdown_gst_is_18_percent_of_trip_amount():
+def test_compute_breakdown_gst_is_5_percent_of_trip_amount():
     """GST is charged on the package price itself, paid by the traveler on
     top — not on the (now-removed) platform fee, and never deducted from
     the agency's payout."""

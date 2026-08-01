@@ -381,7 +381,7 @@ async def _build_user_invoice_data(db: AsyncSession, payment: Payment, invoice: 
                     subtotal=trip_amount,
                 ),
                 InvoiceLineItem(
-                    description="GST (18%)",
+                    description="GST (5%)",
                     subtext="Goods & Services Tax on package price",
                     qty=1,
                     unit="fixed",
