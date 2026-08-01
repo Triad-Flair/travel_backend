@@ -61,7 +61,9 @@ class DirectMessage(CreatedAtMixin, BaseModel):
 
     conversation_id: Mapped[str] = mapped_column("conversationId", String(36), ForeignKey("direct_conversations.id"), nullable=False, index=True)
     sender_id: Mapped[str] = mapped_column("senderId", String(36), ForeignKey("users.id"), nullable=False)
+    message_type: Mapped[str] = mapped_column("messageType", String(20), default="text", nullable=False)
     content: Mapped[str | None] = mapped_column("content", Text, nullable=True)
+    extra_data: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     original_content: Mapped[str | None] = mapped_column("originalContent", Text, nullable=True)
     flagged: Mapped[bool] = mapped_column("flagged", Boolean, default=False, nullable=False)
     flagged_categories: Mapped[list | None] = mapped_column("flaggedCategories", JSONB, nullable=True)

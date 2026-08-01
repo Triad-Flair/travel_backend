@@ -13,6 +13,7 @@ from app.api.v1 import (
     packages,
     payments,
     plans,
+    posts,
     reviews,
     social,
     users,
@@ -35,6 +36,7 @@ v1_router.include_router(reviews.router)
 v1_router.include_router(discover.router)
 v1_router.include_router(notifications.router)
 v1_router.include_router(social.router)
+v1_router.include_router(posts.router)
 v1_router.include_router(invoices.router)
 v1_router.include_router(locations.router)
 v1_router.include_router(loyalty_router)

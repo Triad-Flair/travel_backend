@@ -123,7 +123,7 @@ def _message_type_to_db(raw: str) -> str:
     mapped = raw.upper()
     if mapped == "DOCUMENT":
         return "TEXT"
-    if mapped not in {"TEXT", "SYSTEM", "POLL", "IMAGE", "OFFER"}:
+    if mapped not in {"TEXT", "SYSTEM", "POLL", "IMAGE", "OFFER", "SHARED_POST"}:
         return "TEXT"
     return mapped
 
@@ -160,8 +160,9 @@ def _direct_message_response(message: DirectMessage, sender: User | None) -> Dir
         conversation_id=message.conversation_id,
         sender_id=message.sender_id,
         sender=_user_summary(sender),
+        message_type=message.message_type or "text",
         content=message.content,
-        metadata=None,
+        metadata=message.extra_data,
         created_at=message.created_at.isoformat(),
         flagged=bool(message.flagged),
     )
@@ -775,7 +776,9 @@ async def send_direct_message(
         id=str(uuid.uuid4()),
         conversation_id=conv_id,
         sender_id=user_id,
+        message_type=req.message_type or "text",
         content=moderation.redacted_text if moderation.flagged else req.content,
+        extra_data=req.metadata,
         original_content=req.content if moderation.flagged else None,
         flagged=moderation.flagged,
         flagged_categories=moderation.categories if moderation.flagged else None,

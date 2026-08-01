@@ -52,6 +52,7 @@ class DirectMessageResponse(CamelModel):
     conversation_id: str
     sender_id: str
     sender: UserSummary | None = None
+    message_type: str = "text"
     content: str | None = None
     metadata: dict | None = None
     created_at: str
@@ -90,6 +91,7 @@ class ConversationInboxItem(CamelModel):
 class SendDirectMessageRequest(CamelModel):
     content: str | None = None
     media_url: str | None = None
+    message_type: str = "text"
     metadata: dict | None = None
 
 

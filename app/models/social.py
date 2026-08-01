@@ -1,10 +1,10 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import BaseModel, CreatedAtMixin
+from app.models.base import BaseModel, CreatedAtMixin, TimestampsMixin
 
 
 class Follow(CreatedAtMixin, BaseModel):
@@ -55,6 +55,42 @@ class Review(CreatedAtMixin, BaseModel):
 
     reviewer = relationship("User", lazy="noload", foreign_keys=[reviewer_id],
                             primaryjoin="Review.reviewer_id == User.id")
+
+
+class Post(TimestampsMixin, BaseModel):
+    __tablename__ = "posts"
+    __table_args__ = {"extend_existing": True}
+
+    author_user_id: Mapped[str] = mapped_column("authorUserId", String(36), ForeignKey("users.id"), nullable=False, index=True)
+    caption: Mapped[str | None] = mapped_column("caption", Text, nullable=True)
+    image_urls: Mapped[list | None] = mapped_column("imageUrls", JSONB, nullable=True)
+    destination: Mapped[str | None] = mapped_column("destination", String(120), nullable=True)
+    like_count: Mapped[int] = mapped_column("likeCount", Integer, default=0, nullable=False)
+    comment_count: Mapped[int] = mapped_column("commentCount", Integer, default=0, nullable=False)
+    share_count: Mapped[int] = mapped_column("shareCount", Integer, default=0, nullable=False)
+
+    author = relationship("User", lazy="noload", foreign_keys=[author_user_id],
+                          primaryjoin="Post.author_user_id == User.id")
+
+
+class PostLike(CreatedAtMixin, BaseModel):
+    __tablename__ = "post_likes"
+    __table_args__ = (UniqueConstraint("postId", "userId", name="uq_post_likes_post_user"), {"extend_existing": True})
+
+    post_id: Mapped[str] = mapped_column("postId", String(36), ForeignKey("posts.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column("userId", String(36), ForeignKey("users.id"), nullable=False, index=True)
+
+
+class PostComment(CreatedAtMixin, BaseModel):
+    __tablename__ = "post_comments"
+    __table_args__ = {"extend_existing": True}
+
+    post_id: Mapped[str] = mapped_column("postId", String(36), ForeignKey("posts.id"), nullable=False, index=True)
+    author_user_id: Mapped[str] = mapped_column("authorUserId", String(36), ForeignKey("users.id"), nullable=False)
+    content: Mapped[str] = mapped_column("content", Text, nullable=False)
+
+    author = relationship("User", lazy="noload", foreign_keys=[author_user_id],
+                          primaryjoin="PostComment.author_user_id == User.id")
 
 
 class Notification(CreatedAtMixin, BaseModel):
