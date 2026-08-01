@@ -186,9 +186,12 @@ async def _trip_context(db: AsyncSession, payment: Payment) -> dict:
 
 
 async def list_user_invoices(db: AsyncSession, user_id: str) -> list[dict]:
+    """Only CAPTURED payments — a PENDING/AUTHORIZED/FAILED payment was
+    never actually charged, so surfacing an "invoice" for it here just
+    confused travelers with unpaid trips sitting in their invoice list."""
     rows = await db.execute(
         select(Payment)
-        .where(Payment.user_id == user_id)
+        .where(Payment.user_id == user_id, Payment.status == "CAPTURED")
         .order_by(Payment.created_at.desc())
     )
     payments = rows.scalars().all()
