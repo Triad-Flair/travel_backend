@@ -9,8 +9,6 @@ from functools import lru_cache
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from weasyprint import HTML
-
 from app.schemas.invoices import AgencySettlementResponse, UserInvoiceResponse
 
 logger = logging.getLogger(__name__)
@@ -23,6 +21,22 @@ _env = Environment(
     loader=FileSystemLoader(str(_TEMPLATES_DIR)),
     autoescape=select_autoescape(["html"]),
 )
+
+
+def _write_pdf(html: str) -> bytes:
+    """Render HTML lazily so the API can start without native WeasyPrint libs.
+
+    WeasyPrint needs GTK/Pango shared libraries on Windows.  Those libraries
+    are present in the production container, but are not required for normal
+    API startup or non-PDF endpoints during local development.
+    """
+    try:
+        from weasyprint import HTML
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "PDF rendering requires WeasyPrint's native GTK/Pango libraries"
+        ) from exc
+    return HTML(string=html, base_url=str(_TEMPLATES_DIR)).write_pdf()
 
 
 def _data_uri(path: Path) -> str:
@@ -107,7 +121,7 @@ def render_user_invoice_pdf(payload: UserInvoiceResponse) -> bytes:
         "grand_total_inr": _inr(data["summary"]["grand_total"]),
     }
     html = _env.get_template("user_invoice.html").render(**context)
-    return HTML(string=html, base_url=str(_TEMPLATES_DIR)).write_pdf()
+    return _write_pdf(html)
 
 
 def render_agency_settlement_pdf(payload: AgencySettlementResponse) -> bytes:
@@ -134,4 +148,4 @@ def render_agency_settlement_pdf(payload: AgencySettlementResponse) -> bytes:
         "payout_released": settlement["payout_released"],
     }
     html = _env.get_template("agency_settlement.html").render(**context)
-    return HTML(string=html, base_url=str(_TEMPLATES_DIR)).write_pdf()
+    return _write_pdf(html)

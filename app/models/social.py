@@ -81,16 +81,53 @@ class PostLike(CreatedAtMixin, BaseModel):
     user_id: Mapped[str] = mapped_column("userId", String(36), ForeignKey("users.id"), nullable=False, index=True)
 
 
+class PostSave(CreatedAtMixin, BaseModel):
+    __tablename__ = "post_saves"
+    __table_args__ = (UniqueConstraint("postId", "userId", name="uq_post_saves_post_user"), {"extend_existing": True})
+
+    post_id: Mapped[str] = mapped_column("postId", String(36), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column("userId", String(36), ForeignKey("users.id"), nullable=False, index=True)
+
+
+class PostReport(CreatedAtMixin, BaseModel):
+    __tablename__ = "post_reports"
+    __table_args__ = (UniqueConstraint("postId", "reporterUserId", name="uq_post_reports_post_reporter"), {"extend_existing": True})
+
+    post_id: Mapped[str] = mapped_column("postId", String(36), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    reporter_user_id: Mapped[str] = mapped_column("reporterUserId", String(36), ForeignKey("users.id"), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column("reason", String(40), nullable=False)
+    details: Mapped[str | None] = mapped_column("details", Text, nullable=True)
+    status: Mapped[str] = mapped_column("status", String(20), default="OPEN", nullable=False, index=True)
+
+
+class UserBlock(CreatedAtMixin, BaseModel):
+    __tablename__ = "user_blocks"
+    __table_args__ = (UniqueConstraint("blockerUserId", "blockedUserId", name="uq_user_blocks_blocker_blocked"), {"extend_existing": True})
+
+    blocker_user_id: Mapped[str] = mapped_column("blockerUserId", String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    blocked_user_id: Mapped[str] = mapped_column("blockedUserId", String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+
 class PostComment(CreatedAtMixin, BaseModel):
     __tablename__ = "post_comments"
     __table_args__ = {"extend_existing": True}
 
     post_id: Mapped[str] = mapped_column("postId", String(36), ForeignKey("posts.id"), nullable=False, index=True)
     author_user_id: Mapped[str] = mapped_column("authorUserId", String(36), ForeignKey("users.id"), nullable=False)
+    parent_comment_id: Mapped[str | None] = mapped_column("parentCommentId", String(36), ForeignKey("post_comments.id"), nullable=True, index=True)
     content: Mapped[str] = mapped_column("content", Text, nullable=False)
+    like_count: Mapped[int] = mapped_column("likeCount", Integer, default=0, nullable=False)
 
     author = relationship("User", lazy="noload", foreign_keys=[author_user_id],
                           primaryjoin="PostComment.author_user_id == User.id")
+
+
+class PostCommentLike(CreatedAtMixin, BaseModel):
+    __tablename__ = "post_comment_likes"
+    __table_args__ = (UniqueConstraint("commentId", "userId", name="uq_post_comment_likes_comment_user"), {"extend_existing": True})
+
+    comment_id: Mapped[str] = mapped_column("commentId", String(36), ForeignKey("post_comments.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column("userId", String(36), ForeignKey("users.id"), nullable=False)
 
 
 class Notification(CreatedAtMixin, BaseModel):

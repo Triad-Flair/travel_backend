@@ -2,7 +2,7 @@ import json
 import uuid
 from collections.abc import Iterable, Sequence
 
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import BadRequestError, NotFoundError
@@ -11,7 +11,7 @@ from app.models.group import Group, GroupMember
 from app.models.offer import Offer
 from app.models.package import Package
 from app.models.plan import Plan
-from app.models.social import Follow, Notification, ProfileView, Review
+from app.models.social import Follow, Notification, Post, ProfileView, Review, UserBlock
 from app.models.user import User
 from app.schemas.common import UserSummary
 from app.schemas.social import (
@@ -24,6 +24,7 @@ from app.schemas.social import (
     SocialFeedItem,
     SocialReview,
     SocialTripSummary,
+    SuggestedPersonResponse,
     SubmitReviewRequest,
     TravelerProfileResponse,
 )
@@ -69,6 +70,80 @@ def _follow_target_is(target: str):
     # Cast keeps comparisons compatible even when Postgres enum/text typing
     # comes back differently across environments/drivers.
     return cast(Follow.target_type, String) == target
+
+
+async def get_suggested_people(db: AsyncSession, current_user_id: str, limit: int) -> list[SuggestedPersonResponse]:
+    """Suggest active community creators, excluding follows and both block directions."""
+    followed_ids = select(Follow.target_user_id).where(
+        Follow.follower_user_id == current_user_id,
+        _follow_target_is("USER"),
+        Follow.target_user_id.is_not(None),
+    )
+    blocked_by_viewer = select(UserBlock.blocked_user_id).where(UserBlock.blocker_user_id == current_user_id)
+    blocked_viewer = select(UserBlock.blocker_user_id).where(UserBlock.blocked_user_id == current_user_id)
+    latest_post = func.max(Post.created_at).label("recent_post_at")
+    rows = await db.execute(
+        select(User, latest_post)
+        .join(Post, Post.author_user_id == User.id)
+        .where(
+            User.is_active.is_(True),
+            User.id != current_user_id,
+            ~User.id.in_(followed_ids),
+            ~User.id.in_(blocked_by_viewer),
+            ~User.id.in_(blocked_viewer),
+        )
+        .group_by(User.id)
+        .order_by(latest_post.desc(), User.id.desc())
+        .limit(limit)
+    )
+    return [
+        SuggestedPersonResponse(user=_user_summary(user), recent_post_at=recent_post_at.isoformat())
+        for user, recent_post_at in rows.all()
+    ]
+
+
+async def block_user(db: AsyncSession, blocker_user_id: str, blocked_user_id: str) -> None:
+    if blocker_user_id == blocked_user_id:
+        raise BadRequestError("You cannot block your own account")
+    blocked_user = await db.get(User, blocked_user_id)
+    if not blocked_user:
+        raise NotFoundError("User")
+    existing = await db.scalar(
+        select(UserBlock.id).where(
+            UserBlock.blocker_user_id == blocker_user_id,
+            UserBlock.blocked_user_id == blocked_user_id,
+        )
+    )
+    if not existing:
+        db.add(UserBlock(id=str(uuid.uuid4()), blocker_user_id=blocker_user_id, blocked_user_id=blocked_user_id))
+    # Blocking also removes any direct follows in either direction.
+    await db.execute(
+        delete(Follow).where(
+            or_(
+                and_(
+                    Follow.follower_user_id == blocker_user_id,
+                    _follow_target_is("USER"),
+                    Follow.target_user_id == blocked_user_id,
+                ),
+                and_(
+                    Follow.follower_user_id == blocked_user_id,
+                    _follow_target_is("USER"),
+                    Follow.target_user_id == blocker_user_id,
+                ),
+            )
+        )
+    )
+    await db.flush()
+
+
+async def unblock_user(db: AsyncSession, blocker_user_id: str, blocked_user_id: str) -> None:
+    await db.execute(
+        delete(UserBlock).where(
+            UserBlock.blocker_user_id == blocker_user_id,
+            UserBlock.blocked_user_id == blocked_user_id,
+        )
+    )
+    await db.flush()
 
 
 def _user_summary(user: User) -> UserSummary:

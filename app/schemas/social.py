@@ -47,6 +47,11 @@ class FollowerEntry(CamelModel):
     profile_type: str  # "traveler" | "agency"
 
 
+class SuggestedPersonResponse(CamelModel):
+    user: UserSummary
+    recent_post_at: str
+
+
 class SocialTripSummary(CamelModel):
     id: str
     slug: str

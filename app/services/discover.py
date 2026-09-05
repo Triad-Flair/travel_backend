@@ -46,6 +46,41 @@ def _json_list(raw: object) -> list[str] | None:
     return None
 
 
+def _active_package_price(pkg: Package, joined_count: int) -> tuple[int, int | None]:
+    """Return the currently applicable tier price and a real struck-through price.
+
+    A tier only becomes active once its minimum traveler count is reached.
+    Invalid legacy JSON is ignored, leaving the package's standard price intact.
+    """
+    base_price = int(pkg.price_per_person)
+    raw_tiers = pkg.pricing_tiers
+    if isinstance(raw_tiers, bytes):
+        raw_tiers = raw_tiers.decode(errors="ignore")
+    if isinstance(raw_tiers, str):
+        try:
+            raw_tiers = json.loads(raw_tiers)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_tiers = None
+
+    active_tier: tuple[int, int] | None = None
+    if isinstance(raw_tiers, list):
+        for tier in raw_tiers:
+            if not isinstance(tier, dict):
+                continue
+            try:
+                min_pax = int(tier.get("minPax", tier.get("min_pax", 0)))
+                tier_price = int(tier.get("price", 0))
+            except (TypeError, ValueError):
+                continue
+            if min_pax > 0 and tier_price > 0 and joined_count >= min_pax:
+                if active_tier is None or min_pax > active_tier[0]:
+                    active_tier = (min_pax, tier_price)
+
+    active_price = active_tier[1] if active_tier else base_price
+    original_price = base_price if active_price < base_price else None
+    return active_price, original_price
+
+
 def _plan_to_discover(plan: Plan, joined_count: int = 0) -> DiscoverItem:
     gallery = _json_list(plan.gallery_urls) or []
     cover_image = plan.cover_image_url or (gallery[0] if gallery else None)
@@ -80,6 +115,7 @@ def _pkg_to_discover(pkg: Package, joined_count: int = 0) -> DiscoverItem:
     gallery = _json_list(pkg.gallery_urls) or []
     cover_image = pkg.cover_image_url or (gallery[0] if gallery else None)
     agency = getattr(pkg, "agency", None)
+    active_price, original_price = _active_package_price(pkg, joined_count)
     return DiscoverItem(
         id=pkg.id,
         slug=pkg.slug,
@@ -89,8 +125,9 @@ def _pkg_to_discover(pkg: Package, joined_count: int = 0) -> DiscoverItem:
         destination_state=pkg.destination_state,
         start_date=pkg.start_date.isoformat() if pkg.start_date else None,
         end_date=pkg.end_date.isoformat() if pkg.end_date else None,
-        price_low=pkg.price_per_person,
-        price_high=pkg.price_per_person,
+        price_low=active_price,
+        price_high=active_price,
+        original_price=original_price,
         vibes=_json_list(pkg.vibes),
         group_size_min=pkg.group_size_min,
         group_size_max=pkg.group_size_max,
@@ -148,7 +185,7 @@ async def get_discover_feed(
     import hashlib
     filters_hash = hashlib.md5(filters.model_dump_json().encode()).hexdigest()[:12]
     audience_marker = "agency" if requesting_agency_id else "public"
-    cache_key = CacheKeys.discover_feed(filters.page, f"{filters_hash}:{audience_marker}")
+    cache_key = CacheKeys.discover_feed(filters.page, f"v2:{filters_hash}:{audience_marker}")
 
     cached = await get_cached(cache_key)
     if cached:
@@ -258,7 +295,7 @@ async def get_trending(
         # here by the same rule as get_discover_feed (PRD 2.3).
         return []
 
-    cache_key = CacheKeys.trending(page)
+    cache_key = f"{CacheKeys.trending(page)}:v3"
     cached = await get_cached(cache_key)
     if cached:
         return [DiscoverItem(**i) for i in cached]
@@ -271,7 +308,9 @@ async def get_trending(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    items = [_pkg_to_discover(p) for p in result.scalars().all()]
+    packages = list(result.scalars().all())
+    package_counts = await _batch_pkg_joined_counts(db, [package.id for package in packages])
+    items = [_pkg_to_discover(package, package_counts.get(package.id, 0)) for package in packages]
     await set_cached(cache_key, [i.model_dump(by_alias=True) for i in items], TTL_SHORT)
     return items
 
@@ -314,8 +353,10 @@ async def search(
             .order_by(Plan.created_at.desc())
             .limit(page_size)
         )
-        for plan in plan_result.scalars().all():
-            plan_items.append(_plan_to_discover(plan))
+        plans = list(plan_result.scalars().all())
+        plan_counts = await _batch_plan_joined_counts(db, [plan.id for plan in plans])
+        for plan in plans:
+            plan_items.append(_plan_to_discover(plan, plan_counts.get(plan.id, 0)))
 
     if show_packages and origin_type in (None, "package"):
         package_conditions = [
@@ -331,8 +372,10 @@ async def search(
             .order_by(Package.created_at.desc())
             .limit(page_size)
         )
-        for pkg in pkg_result.scalars().all():
-            pkg_items.append(_pkg_to_discover(pkg))
+        packages = list(pkg_result.scalars().all())
+        package_counts = await _batch_pkg_joined_counts(db, [package.id for package in packages])
+        for package in packages:
+            pkg_items.append(_pkg_to_discover(package, package_counts.get(package.id, 0)))
 
     for i in range(max(len(plan_items), len(pkg_items))):
         if i < len(plan_items):
@@ -384,8 +427,10 @@ async def get_following_feed(
             .offset((filters.page - 1) * filters.page_size)
             .limit(filters.page_size)
         )
-        for plan in rows.scalars().all():
-            items.append(_plan_to_discover(plan))
+        plans = list(rows.scalars().all())
+        plan_counts = await _batch_plan_joined_counts(db, [plan.id for plan in plans])
+        for plan in plans:
+            items.append(_plan_to_discover(plan, plan_counts.get(plan.id, 0)))
 
     if filters.origin_type in (None, "package") and followed_agency_ids:
         package_query = select(Package).where(
@@ -409,8 +454,10 @@ async def get_following_feed(
             .offset((filters.page - 1) * filters.page_size)
             .limit(filters.page_size)
         )
-        for package in rows.scalars().all():
-            items.append(_pkg_to_discover(package))
+        packages = list(rows.scalars().all())
+        package_counts = await _batch_pkg_joined_counts(db, [package.id for package in packages])
+        for package in packages:
+            items.append(_pkg_to_discover(package, package_counts.get(package.id, 0)))
 
     items.sort(key=lambda item: item.created_at, reverse=True)
     return items[: filters.page_size]

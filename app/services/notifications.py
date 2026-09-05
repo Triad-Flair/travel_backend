@@ -156,11 +156,31 @@ async def mark_all_read(db: AsyncSession, user_id: str) -> dict:
 async def get_profile_views(
     db: AsyncSession, user_id: str, limit: int
 ) -> list[ProfileViewResponse]:
+    # A viewer may open a profile more than once (or view both traveler and
+    # agency profiles). Keep only their latest view so the UI shows people,
+    # not duplicate visit events. The window also handles equal timestamps.
+    latest_view_ids = (
+        select(
+            ProfileView.id.label("profile_view_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    ProfileView.viewer_user_id,
+                ),
+                order_by=(ProfileView.created_at.desc(), ProfileView.id.desc()),
+            )
+            .label("view_rank"),
+        )
+        .where(ProfileView.target_owner_user_id == user_id)
+        .subquery()
+    )
+
     rows = await db.execute(
         select(ProfileView, User)
+        .join(latest_view_ids, latest_view_ids.c.profile_view_id == ProfileView.id)
         .join(User, User.id == ProfileView.viewer_user_id)
-        .where(ProfileView.target_owner_user_id == user_id)
-        .order_by(ProfileView.created_at.desc())
+        .where(latest_view_ids.c.view_rank == 1)
+        .order_by(ProfileView.created_at.desc(), ProfileView.id.desc())
         .limit(limit)
     )
 

@@ -8,10 +8,38 @@ from app.schemas.social import (
     FollowStateResponse,
     PublicProfileResponse,
     SocialFeedItem,
+    SuggestedPersonResponse,
 )
 from app.services import social as social_svc
 
 router = APIRouter(prefix="/social", tags=["social"])
+
+
+@router.get("/suggestions/people", response_model=list[SuggestedPersonResponse])
+async def suggested_people(
+    limit: int = Query(default=3, ge=1, le=10),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await social_svc.get_suggested_people(db, current_user.user_id, limit)
+
+
+@router.post("/blocks/{user_id}", status_code=204)
+async def block_user(
+    user_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await social_svc.block_user(db, current_user.user_id, user_id)
+
+
+@router.delete("/blocks/{user_id}", status_code=204)
+async def unblock_user(
+    user_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await social_svc.unblock_user(db, current_user.user_id, user_id)
 
 
 @router.get("/feed", response_model=list[SocialFeedItem])

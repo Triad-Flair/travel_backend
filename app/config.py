@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str
     sync_database_url: str = ""
+    database_url_port: int | None = None
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -135,6 +136,15 @@ class Settings(BaseSettings):
             return f"{scheme}://{remainder}"
 
         credentials, host_and_path = remainder.rsplit("@", 1)
+
+        # Supabase's transaction pooler is the reliable local-development
+        # endpoint when the session pooler has exhausted its client limit.
+        if self.database_url_port:
+            host, separator, path = host_and_path.partition("/")
+            if ":" in host:
+                host = f"{host.rsplit(':', 1)[0]}:{self.database_url_port}"
+                host_and_path = f"{host}{separator}{path}"
+
         if ":" not in credentials:
             safe_user = quote(unquote(credentials), safe="")
             return f"{scheme}://{safe_user}@{host_and_path}"
