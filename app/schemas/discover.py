@@ -13,6 +13,9 @@ class DiscoverItem(CamelModel):
     end_date: str | None = None
     price_low: int | None = None
     price_high: int | None = None
+    # Set only when an active package pricing tier is cheaper than its
+    # standard per-person price. Plans never receive a synthetic discount.
+    original_price: int | None = None
     vibes: list[str] | None = None
     group_type: str | None = None
     group_size_min: int = 1
