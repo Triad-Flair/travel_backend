@@ -16,6 +16,7 @@ class User(TimestampsMixin, BaseModel):
     username: Mapped[str] = mapped_column("username", String(50), nullable=False, index=True)
     display_name: Mapped[str | None] = mapped_column("fullName", String(100), nullable=True)
     avatar_url: Mapped[str | None] = mapped_column("avatarUrl", Text, nullable=True)
+    cover_image_url: Mapped[str | None] = mapped_column("coverImageUrl", Text, nullable=True)
     date_of_birth: Mapped[datetime | None] = mapped_column(
         "dateOfBirth", DateTime(timezone=False), nullable=True
     )

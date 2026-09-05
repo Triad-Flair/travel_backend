@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from collections.abc import Iterable, Sequence
 
@@ -16,6 +17,8 @@ from app.models.user import User
 from app.schemas.common import UserSummary
 from app.schemas.social import (
     AgencyProfileResponse,
+    CommunitySearchResponse,
+    CommunityTopic,
     FollowStateResponse,
     FollowerEntry,
     PublicProfileResponse,
@@ -30,6 +33,7 @@ from app.schemas.social import (
 )
 
 ACTIVE_FEED_STATUSES = {"OPEN", "CONFIRMING", "CONFIRMED"}
+HASHTAG_PATTERN = re.compile(r"#([a-zA-Z0-9_]{2,50})")
 
 
 def _json_list(raw: object) -> list[str]:
@@ -70,6 +74,122 @@ def _follow_target_is(target: str):
     # Cast keeps comparisons compatible even when Postgres enum/text typing
     # comes back differently across environments/drivers.
     return cast(Follow.target_type, String) == target
+
+
+async def search_community(
+    db: AsyncSession,
+    query: str,
+    kind: str,
+    page_size: int,
+    sort: str,
+    viewer_user_id: str | None = None,
+) -> CommunitySearchResponse:
+    """Search the public community directory without requiring a session.
+
+    Each result family is queried independently so the UI can offer explicit
+    Users, Agencies, Posts, and Topics filters instead of mixing unrelated
+    records in one text result.
+    """
+    term = query.strip()
+    pattern = f"%{term}%"
+    response = CommunitySearchResponse()
+
+    if kind in {"all", "users"}:
+        rows = await db.execute(
+            select(User)
+            .where(
+                User.is_active.is_(True),
+                User.username.ilike(pattern) | User.display_name.ilike(pattern),
+            )
+            .order_by(User.display_name.asc(), User.username.asc())
+            .limit(page_size)
+        )
+        response.users = [_user_summary(user) for user in rows.scalars().all()]
+
+    if kind in {"all", "agencies"}:
+        from app.services.agencies import _agency_to_public_summary
+
+        agency_match = or_(
+            Agency.name.ilike(pattern),
+            Agency.slug.ilike(pattern),
+            Agency.description.ilike(pattern),
+            Agency.city.ilike(pattern),
+            Agency.state.ilike(pattern),
+            cast(Agency.specializations, String).ilike(pattern),
+            cast(Agency.destinations, String).ilike(pattern),
+        )
+        rows = await db.execute(
+            select(Agency)
+            .where(Agency.is_active.is_(True), agency_match)
+            .order_by(Agency.avg_rating.desc(), Agency.name.asc())
+            .limit(page_size)
+        )
+        response.agencies = [_agency_to_public_summary(agency) for agency in rows.scalars().all()]
+
+    if kind in {"all", "posts", "topics"}:
+        post_match = or_(
+            Post.caption.ilike(pattern),
+            Post.destination.ilike(pattern),
+            User.username.ilike(pattern),
+            User.display_name.ilike(pattern),
+        )
+        post_query = (
+            select(Post)
+            .join(User, User.id == Post.author_user_id)
+            .where(post_match)
+        )
+        if sort == "popular":
+            post_query = post_query.order_by(
+                (Post.like_count + Post.comment_count + Post.share_count).desc(),
+                Post.created_at.desc(),
+            )
+        else:
+            post_query = post_query.order_by(Post.created_at.desc())
+        rows = await db.execute(post_query.limit(max(page_size, 30)))
+        matching_posts = list(rows.scalars().all())
+
+        if kind in {"all", "posts"}:
+            from app.services.posts import _post_to_response
+
+            response.posts = [
+                await _post_to_response(db, post, viewer_user_id)
+                for post in matching_posts[:page_size]
+            ]
+
+        if kind in {"all", "topics"}:
+            topic_counts: dict[str, int] = {}
+            latest_topic_at: dict[str, str] = {}
+            for post in matching_posts:
+                candidates = [post.destination, *HASHTAG_PATTERN.findall(post.caption or "")]
+                for candidate in candidates:
+                    if not candidate:
+                        continue
+                    name = candidate.strip().lstrip("#")
+                    if not name or term.lower() not in name.lower():
+                        continue
+                    topic_key = name.casefold()
+                    topic_counts[topic_key] = topic_counts.get(topic_key, 0) + 1
+                    latest_topic_at.setdefault(topic_key, post.created_at.isoformat())
+
+            response.topics = [
+                CommunityTopic(
+                    name=next(
+                        candidate
+                        for candidate in [
+                            post.destination,
+                            *HASHTAG_PATTERN.findall(post.caption or ""),
+                        ]
+                        if candidate and candidate.casefold().lstrip("#") == topic_key
+                    ),
+                    post_count=count,
+                    latest_post_at=latest_topic_at.get(topic_key),
+                )
+                for topic_key, count in sorted(
+                    topic_counts.items(), key=lambda item: (-item[1], item[0])
+                )[:page_size]
+            ]
+
+    return response
 
 
 async def get_suggested_people(db: AsyncSession, current_user_id: str, limit: int) -> list[SuggestedPersonResponse]:
@@ -468,6 +588,7 @@ async def get_public_profile(db: AsyncSession, handle: str) -> PublicProfileResp
             id=user.id,
             name=user.display_name or user.username or "Traveler",
             avatar_url=user.avatar_url,
+            cover_image_url=user.cover_image_url,
             bio=user.bio,
             travel_preferences=user.travel_style,
             location=user.location,

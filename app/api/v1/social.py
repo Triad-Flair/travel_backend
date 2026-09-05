@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user, get_optional_user
 from app.schemas.social import (
+    CommunitySearchResponse,
     FollowerEntry,
     FollowStateResponse,
     PublicProfileResponse,
@@ -13,6 +14,25 @@ from app.schemas.social import (
 from app.services import social as social_svc
 
 router = APIRouter(prefix="/social", tags=["social"])
+
+
+@router.get("/search", response_model=CommunitySearchResponse)
+async def search_community(
+    q: str = Query(..., min_length=2, max_length=80),
+    kind: str = Query(default="all", pattern="^(all|users|agencies|posts|topics)$"),
+    page_size: int = Query(default=8, ge=1, le=25, alias="pageSize"),
+    sort: str = Query(default="recent", pattern="^(relevance|recent|popular)$"),
+    current_user: CurrentUser | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await social_svc.search_community(
+        db,
+        q,
+        kind,
+        page_size,
+        sort,
+        current_user.user_id if current_user else None,
+    )
 
 
 @router.get("/suggestions/people", response_model=list[SuggestedPersonResponse])

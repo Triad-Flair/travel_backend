@@ -57,6 +57,7 @@ def _build_user_in_session(user: User, agency=None) -> UserInSession:
         full_name=user.display_name or user.username or "",
         username=user.username,
         avatar_url=user.avatar_url,
+        cover_image_url=user.cover_image_url,
         phone=user.phone,
         email=user.email,
         bio=user.bio,
@@ -378,6 +379,8 @@ async def update_profile(db: AsyncSession, user_id: str, req: UpdateProfileReque
         user.bio = req.bio
     if req.avatar_url is not None:
         user.avatar_url = req.avatar_url
+    if "cover_image_url" in req.model_fields_set:
+        user.cover_image_url = req.cover_image_url
     if req.city is not None:
         user.location = req.city
     if req.travel_preferences is not None:

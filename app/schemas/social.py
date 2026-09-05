@@ -1,7 +1,8 @@
 from datetime import datetime
 
 from app.schemas.base import CamelModel
-from app.schemas.common import UserSummary
+from app.schemas.common import AgencyPublicSummary, UserSummary
+from app.schemas.posts import PostResponse
 
 
 class SocialFeedAuthor(CamelModel):
@@ -52,6 +53,19 @@ class SuggestedPersonResponse(CamelModel):
     recent_post_at: str
 
 
+class CommunityTopic(CamelModel):
+    name: str
+    post_count: int
+    latest_post_at: str | None = None
+
+
+class CommunitySearchResponse(CamelModel):
+    users: list[UserSummary] = []
+    agencies: list[AgencyPublicSummary] = []
+    posts: list[PostResponse] = []
+    topics: list[CommunityTopic] = []
+
+
 class SocialTripSummary(CamelModel):
     id: str
     slug: str
@@ -82,6 +96,7 @@ class TravelerProfileResponse(CamelModel):
     id: str
     name: str
     avatar_url: str | None = None
+    cover_image_url: str | None = None
     bio: str | None = None
     travel_preferences: str | None = None
     location: str | None = None

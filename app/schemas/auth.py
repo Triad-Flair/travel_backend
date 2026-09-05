@@ -101,6 +101,7 @@ class UserInSession(CamelModel):
     full_name: str
     username: str | None = None
     avatar_url: str | None = None
+    cover_image_url: str | None = None
     phone: str | None = None
     email: str | None = None
     bio: str | None = None
@@ -138,6 +139,7 @@ class UpdateProfileRequest(CamelModel):
     email: EmailStr | None = None
     bio: str | None = Field(None, max_length=500)
     avatar_url: str | None = None
+    cover_image_url: str | None = None
     city: str | None = None
     travel_preferences: str | None = None
     gender: str | None = None
