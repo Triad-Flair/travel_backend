@@ -277,19 +277,17 @@ async def get_trending(
 
 
 async def search(
-    db: AsyncSession, q: str, page: int, page_size: int, requesting_agency_id: str | None = None
+    db: AsyncSession,
+    q: str,
+    page: int,
+    page_size: int,
+    requesting_agency_id: str | None = None,
+    origin_type: str | None = None,
+    vibes: str | None = None,
 ) -> list[DiscoverItem]:
     term = f"%{q}%"
     items: list[DiscoverItem] = []
     show_packages = not requesting_agency_id
-
-    plan_conditions = [
-        Plan.status.in_(['OPEN', 'CONFIRMING']),
-        (Plan.title.ilike(term) | Plan.destination.ilike(term)),
-    ]
-    if not requesting_agency_id:
-        # Corporate plans are private — never surfaced in search to other travelers.
-        plan_conditions.append(Plan.plan_type == 'STANDARD')
 
     plan_items: list[DiscoverItem] = []
     pkg_items: list[DiscoverItem] = []
@@ -298,24 +296,38 @@ async def search(
     # in half up front — otherwise a thin package catalog silently starves
     # plan results (and vice versa) instead of the abundant side backfilling
     # the gap, same fix as get_discover_feed above.
-    plan_result = await db.execute(
-        select(Plan)
-        .options(selectinload(Plan.creator))
-        .where(*plan_conditions)
-        .order_by(Plan.created_at.desc())
-        .limit(page_size)
-    )
-    for plan in plan_result.scalars().all():
-        plan_items.append(_plan_to_discover(plan))
+    if origin_type in (None, "plan"):
+        plan_conditions = [
+            Plan.status.in_(['OPEN', 'CONFIRMING']),
+            (Plan.title.ilike(term) | Plan.destination.ilike(term)),
+        ]
+        if not requesting_agency_id:
+            # Corporate plans are private — never surfaced in search to other travelers.
+            plan_conditions.append(Plan.plan_type == 'STANDARD')
+        if vibes:
+            plan_conditions.append(Plan.vibes.contains([vibes]))
 
-    if show_packages:
+        plan_result = await db.execute(
+            select(Plan)
+            .options(selectinload(Plan.creator))
+            .where(*plan_conditions)
+            .order_by(Plan.created_at.desc())
+            .limit(page_size)
+        )
+        for plan in plan_result.scalars().all():
+            plan_items.append(_plan_to_discover(plan))
+
+    if show_packages and origin_type in (None, "package"):
+        package_conditions = [
+            Package.status.in_(['OPEN', 'CONFIRMING']),
+            (Package.title.ilike(term) | Package.destination.ilike(term)),
+        ]
+        if vibes:
+            package_conditions.append(Package.vibes.contains([vibes]))
         pkg_result = await db.execute(
             select(Package)
             .options(selectinload(Package.agency))
-            .where(
-                Package.status.in_(['OPEN', 'CONFIRMING']),
-                (Package.title.ilike(term) | Package.destination.ilike(term)),
-            )
+            .where(*package_conditions)
             .order_by(Package.created_at.desc())
             .limit(page_size)
         )

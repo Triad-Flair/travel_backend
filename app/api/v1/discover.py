@@ -56,13 +56,15 @@ async def trending(
 @router.get("/search", response_model=list[DiscoverItem])
 async def search(
     q: str = Query(..., min_length=2),
+    origin_type: str | None = Query(default=None, alias="originType"),
+    vibes: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50, alias="pageSize"),
     current_user: CurrentUser | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     requesting_agency_id = current_user.agency_id if current_user else None
-    return await disc_svc.search(db, q, page, page_size, requesting_agency_id)
+    return await disc_svc.search(db, q, page, page_size, requesting_agency_id, origin_type, vibes)
 
 
 @router.get("/following", response_model=list[DiscoverItem])
