@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import secrets
 import uuid
 from datetime import UTC, datetime
 from collections.abc import Sequence
@@ -12,7 +13,8 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.core.cache import CacheKeys, TTL_MEDIUM, get_cached, invalidate, set_cached
-from app.exceptions import BadRequestError, ForbiddenError, NotFoundError, PaymentError
+from app.core.security import hash_password
+from app.exceptions import BadRequestError, ConflictError, ForbiddenError, NotFoundError, PaymentError
 from app.lib.gst import verify_gstin
 from app.lib.ifsc import lookup_ifsc as lookup_ifsc_code
 from app.lib.razorpay_route import configure_route_settlement, create_linked_account
@@ -24,6 +26,8 @@ from app.schemas.agencies import (
     AgencyBankDetailsBrief,
     AgencyProfile,
     AgencyVerificationFlags,
+    AdminCreateAgencyRequest,
+    AdminCreateAgencyResponse,
     CreateAgencyRequest,
     GstVerifyResponse,
     IfscLookupResponse,
@@ -264,6 +268,107 @@ async def create_agency(db: AsyncSession, owner_id: str, req: CreateAgencyReques
     db.add(AgencyWallet(id=str(uuid.uuid4()), agency_id=agency.id))
     await db.flush()
     return _to_profile(agency)
+
+
+def _normalize_admin_phone(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = re.sub(r"\D", "", value)
+    if len(cleaned) == 12 and cleaned.startswith("91"):
+        cleaned = cleaned[2:]
+    if not re.fullmatch(r"[6-9]\d{9}", cleaned):
+        raise BadRequestError("Phone numbers must be valid 10-digit Indian mobile numbers")
+    return cleaned
+
+
+def _generate_temporary_password() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "TS-" + "".join(secrets.choice(alphabet) for _ in range(14))
+
+
+async def admin_create_agency(
+    db: AsyncSession,
+    req: AdminCreateAgencyRequest,
+) -> AdminCreateAgencyResponse:
+    """Create an agency owner and agency in one admin transaction.
+
+    The temporary password is returned once to the admin, while only its
+    bcrypt hash and the forced-change flag are stored in the database.
+    """
+    from app.services.locations import validate_state_name
+    from app.services.auth import _parse_date_of_birth
+
+    username = req.username.strip().lower()
+    email = str(req.email).strip().lower()
+    phone = _normalize_admin_phone(req.phone)
+    agency_phone = _normalize_admin_phone(req.agency_phone)
+    agency_email = str(req.agency_email).strip().lower() if req.agency_email else None
+
+    if await db.scalar(select(User).where(func.lower(User.email) == email)):
+        raise ConflictError("Email already registered")
+    if await db.scalar(select(User).where(func.lower(User.username) == username)):
+        raise ConflictError("Username already taken")
+    if phone and await db.scalar(select(User).where(User.phone == phone)):
+        raise ConflictError("Phone already registered")
+    if req.gstin and await db.scalar(select(Agency).where(Agency.gstin == req.gstin.strip().upper())):
+        raise ConflictError("GSTIN already registered")
+
+    await validate_state_name(db, req.agency_state)
+    gstin = req.gstin.strip().upper() if req.gstin else None
+    pan = req.pan.strip().upper() if req.pan else None
+    _assert_gstin_pan_valid(gstin, pan)
+
+    temporary_password = _generate_temporary_password()
+    user = User(
+        id=str(uuid.uuid4()),
+        email=email,
+        username=username,
+        display_name=req.full_name.strip(),
+        phone=phone,
+        password_hash=hash_password(temporary_password),
+        date_of_birth=_parse_date_of_birth(req.date_of_birth),
+        gender=req.gender,
+        location=req.city or req.agency_city,
+        travel_style=req.travel_preferences,
+        bio=req.bio,
+        must_change_password=True,
+        email_verified=True,
+        email_verification_token=None,
+    )
+    db.add(user)
+    await db.flush()
+
+    agency = Agency(
+        id=str(uuid.uuid4()),
+        owner_id=user.id,
+        name=req.agency_name.strip(),
+        slug=slugify(req.agency_name) + "-" + user.id[:8],
+        description=req.agency_description,
+        city=req.agency_city,
+        state=req.agency_state,
+        address=req.agency_address,
+        postal_code=req.postal_code,
+        phone=agency_phone or phone,
+        email=agency_email or email,
+        gstin=gstin,
+        pan=pan,
+        tourism_license=req.tourism_license,
+        specializations=req.specializations or None,
+        destinations=req.destinations or None,
+    )
+    db.add(agency)
+    await db.flush()
+    db.add(AgencyMember(id=str(uuid.uuid4()), agency_id=agency.id, user_id=user.id, role="ADMIN"))
+    db.add(AgencyWallet(id=str(uuid.uuid4()), agency_id=agency.id))
+    await db.flush()
+
+    return AdminCreateAgencyResponse(
+        agency_id=agency.id,
+        agency_name=agency.name,
+        username=user.username,
+        email=email,
+        temporary_password=temporary_password,
+    )
 
 
 GSTIN_PATTERN = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")

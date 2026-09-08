@@ -1,5 +1,6 @@
 import hashlib
 import re
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -31,6 +32,7 @@ from app.schemas.auth import (
     AgencySignupRequest,
     AuthActionResponse,
     AuthSessionResponse,
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     ResetPasswordRequest,
@@ -80,7 +82,13 @@ def _build_session(user: User, agency_id: str | None = None, agency=None) -> Aut
         user=_build_user_in_session(user, agency),
         agency_id=agency_id,
         role=role,
+        must_change_password=bool(user.must_change_password),
     )
+
+
+def _generate_temporary_password() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "TS-" + "".join(secrets.choice(alphabet) for _ in range(14))
 
 
 def _password_fingerprint(password_hash: str | None) -> str:
@@ -492,8 +500,33 @@ async def reset_password(db: AsyncSession, req: ResetPasswordRequest) -> SignupM
         raise InvalidTokenError()
 
     user.password_hash = hash_password(req.password)
+    user.must_change_password = False
     await db.flush()
     return SignupMessageResponse(message="Password updated successfully. You can sign in now.")
+
+
+async def change_password(
+    db: AsyncSession,
+    user_id: str,
+    req: ChangePasswordRequest,
+) -> AuthSessionResponse:
+    """Update an authenticated user's password and return fresh auth tokens."""
+    from app.models.agency import Agency, AgencyMember
+
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if not user or not user.is_active:
+        raise UnauthorizedError()
+
+    user.password_hash = hash_password(req.new_password)
+    user.must_change_password = False
+    await db.flush()
+
+    member = await db.scalar(
+        select(AgencyMember).where(AgencyMember.user_id == user.id, AgencyMember.is_active == True)
+    )
+    agency_id = member.agency_id if member else None
+    agency = await db.scalar(select(Agency).where(Agency.id == agency_id)) if agency_id else None
+    return _build_session(user, agency_id, agency)
 
 
 async def verify_aadhaar_for_user(

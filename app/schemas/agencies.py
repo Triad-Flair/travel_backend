@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import EmailStr, Field
 
 from app.schemas.base import CamelModel
 
@@ -46,6 +46,41 @@ class CreateAgencyRequest(CamelModel):
     tourism_license: str | None = None
     specializations: list[str] = []
     destinations: list[str] = []
+
+
+class AdminCreateAgencyRequest(CamelModel):
+    """Agency onboarding payload for the platform admin dashboard."""
+    full_name: str = Field(..., min_length=2, max_length=100)
+    username: str = Field(..., min_length=3, max_length=50, pattern=r"^[a-z0-9_]+$")
+    email: EmailStr
+    phone: str | None = None
+    date_of_birth: str | None = None
+    gender: str | None = None
+    city: str | None = None
+    travel_preferences: str | None = None
+    bio: str | None = None
+    agency_name: str = Field(..., min_length=2, max_length=200)
+    agency_description: str | None = None
+    agency_phone: str | None = None
+    agency_email: EmailStr | None = None
+    agency_address: str | None = None
+    agency_city: str | None = None
+    agency_state: str | None = None
+    postal_code: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    tourism_license: str | None = None
+    specializations: list[str] = []
+    destinations: list[str] = []
+
+
+class AdminCreateAgencyResponse(CamelModel):
+    agency_id: str
+    agency_name: str
+    username: str
+    email: str
+    temporary_password: str
+    must_change_password: bool = True
 
 
 class UpdateAgencyRequest(CamelModel):

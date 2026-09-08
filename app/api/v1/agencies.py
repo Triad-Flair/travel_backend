@@ -4,6 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user, get_optional_user
 from app.schemas.agencies import (
+    AdminCreateAgencyRequest,
+    AdminCreateAgencyResponse,
     AgencyAdminDirectoryItem,
     CreateAgencyRequest,
     GstVerifyResponse,
@@ -131,6 +133,16 @@ async def admin_agency_directory(
     status and the per-field verification checklist."""
     current_user.require_admin()
     return await ag_svc.list_all_agencies_admin(db)
+
+
+@router.post("/admin/create", response_model=AdminCreateAgencyResponse, status_code=201)
+async def admin_create_agency(
+    req: AdminCreateAgencyRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.require_admin()
+    return await ag_svc.admin_create_agency(db, req)
 
 
 @router.patch("/admin/{agency_id}/verification-flags", response_model=AgencyAdminDirectoryItem)

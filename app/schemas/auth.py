@@ -67,6 +67,10 @@ class AgencySignupRequest(CamelModel):
     _validate_agency_phone = field_validator("agency_phone")(_validate_indian_mobile)
 
 
+class ChangePasswordRequest(CamelModel):
+    new_password: str = Field(..., min_length=8, max_length=72)
+
+
 class LoginRequest(CamelModel):
     identifier: str = Field(..., description="Email, phone, or username")
     password: str
@@ -123,6 +127,7 @@ class AuthSessionResponse(CamelModel):
     user: UserInSession
     agency_id: str | None = None
     role: str
+    must_change_password: bool = False
 
 
 class SignupMessageResponse(CamelModel):

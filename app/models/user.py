@@ -34,6 +34,7 @@ class User(TimestampsMixin, BaseModel):
     avg_rating: Mapped[float] = mapped_column("avgRating", Float, default=0.0, nullable=False)
     is_active: Mapped[bool] = mapped_column("isActive", Boolean, default=True, nullable=False)
     password_hash: Mapped[str | None] = mapped_column("passwordHash", String(255), nullable=True)
+    must_change_password: Mapped[bool] = mapped_column("mustChangePassword", Boolean, default=False, nullable=False)
     travel_style: Mapped[str | None] = mapped_column("travelPreferences", Text, nullable=True)
     referral_code: Mapped[str | None] = mapped_column("referralCode", String(20), nullable=True)
     email_verified: Mapped[bool] = mapped_column("emailVerified", Boolean, default=False, nullable=False)

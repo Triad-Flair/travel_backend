@@ -13,6 +13,7 @@ from app.schemas.auth import (
     AgencySignupRequest,
     AuthActionResponse,
     AuthSessionResponse,
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     RefreshRequest,
@@ -128,6 +129,15 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
 @router.post("/reset-password", response_model=SignupMessageResponse)
 async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     return await auth_svc.reset_password(db, req)
+
+
+@router.patch("/me/password", response_model=AuthSessionResponse)
+async def change_password(
+    req: ChangePasswordRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_svc.change_password(db, current_user.user_id, req)
 
 
 @router.get("/smtp-test")
