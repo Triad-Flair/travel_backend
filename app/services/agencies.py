@@ -15,6 +15,7 @@ from app.config import settings
 from app.core.cache import CacheKeys, TTL_MEDIUM, get_cached, invalidate, set_cached
 from app.core.security import hash_password
 from app.exceptions import BadRequestError, ConflictError, ForbiddenError, NotFoundError, PaymentError
+from app.lib.crypto import decrypt, encrypt
 from app.lib.gst import verify_gstin
 from app.lib.ifsc import lookup_ifsc as lookup_ifsc_code
 from app.lib.razorpay_route import configure_route_settlement, create_linked_account
@@ -362,12 +363,40 @@ async def admin_create_agency(
     db.add(AgencyWallet(id=str(uuid.uuid4()), agency_id=agency.id))
     await db.flush()
 
+    bank_values = (
+        req.bank_account_number,
+        req.bank_ifsc_code,
+        req.bank_account_holder_name,
+        req.bank_name,
+        req.bank_branch_name,
+    )
+    bank_details_added = False
+    if any(value and str(value).strip() for value in bank_values):
+        if not req.bank_account_number or not req.bank_ifsc_code or not req.bank_account_holder_name:
+            raise BadRequestError(
+                "Bank account number, IFSC code, and account holder name are required when adding bank details"
+            )
+        await verify_bank_account(
+            db,
+            agency.id,
+            user.id,
+            {
+                "accountNumber": req.bank_account_number,
+                "ifscCode": req.bank_ifsc_code,
+                "accountHolderName": req.bank_account_holder_name,
+                "bankName": req.bank_name,
+                "branchName": req.bank_branch_name,
+            },
+        )
+        bank_details_added = True
+
     return AdminCreateAgencyResponse(
         agency_id=agency.id,
         agency_name=agency.name,
         username=user.username,
         email=email,
         temporary_password=temporary_password,
+        bank_details_added=bank_details_added,
     )
 
 
@@ -689,7 +718,13 @@ async def update_agency_operational_status(
 
 
 def _mask_account(account: str) -> str:
-    cleaned = re.sub(r"\\s+", "", account or "")
+    try:
+        account = decrypt(account)
+    except Exception:
+        # Backward compatibility for records written before encryption was
+        # applied to this column.
+        pass
+    cleaned = re.sub(r"\s+", "", account or "")
     if len(cleaned) <= 4:
         return cleaned
     return ("*" * (len(cleaned) - 4)) + cleaned[-4:]
@@ -778,7 +813,7 @@ async def _sync_razorpay_linked_account(
 
         await configure_route_settlement(
             account_id,
-            account_number=bank.account_number_encrypted,
+            account_number=_bank_account_plaintext(bank.account_number_encrypted),
             ifsc_code=bank.ifsc_code or "",
             beneficiary_name=bank.account_holder_name,
         )
@@ -790,6 +825,14 @@ async def _sync_razorpay_linked_account(
 
 ACCOUNT_NUMBER_PATTERN = re.compile(r"^[0-9]{9,18}$")
 IFSC_PATTERN = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
+
+
+def _bank_account_plaintext(stored_account: str) -> str:
+    try:
+        return decrypt(stored_account)
+    except Exception:
+        # Existing installations may contain legacy plaintext values.
+        return stored_account
 
 
 async def verify_bank_account(
@@ -853,7 +896,7 @@ async def verify_bank_account(
         bank = AgencyBankAccount(
             id=str(uuid.uuid4()),
             agency_id=agency_id,
-            account_number_encrypted=account_number,
+            account_number_encrypted=encrypt(account_number),
             ifsc_code=ifsc_code,
             account_holder_name=account_holder_name,
             bank_name=bank_name,
@@ -862,7 +905,7 @@ async def verify_bank_account(
         )
         db.add(bank)
     else:
-        bank.account_number_encrypted = account_number
+        bank.account_number_encrypted = encrypt(account_number)
         bank.ifsc_code = ifsc_code
         bank.account_holder_name = account_holder_name
         bank.bank_name = bank_name

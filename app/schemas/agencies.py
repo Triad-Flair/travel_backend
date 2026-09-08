@@ -44,6 +44,11 @@ class CreateAgencyRequest(CamelModel):
     gstin: str | None = None
     pan: str | None = None
     tourism_license: str | None = None
+    bank_account_number: str | None = None
+    bank_ifsc_code: str | None = None
+    bank_account_holder_name: str | None = None
+    bank_name: str | None = None
+    bank_branch_name: str | None = None
     specializations: list[str] = []
     destinations: list[str] = []
 
@@ -81,6 +86,7 @@ class AdminCreateAgencyResponse(CamelModel):
     email: str
     temporary_password: str
     must_change_password: bool = True
+    bank_details_added: bool = False
 
 
 class UpdateAgencyRequest(CamelModel):
